@@ -19,4 +19,7 @@ pub enum VeilError {
 
     #[error("Version mismatch: expected {expected}, got {actual}")]
     VersionMismatch { expected: u8, actual: u8 },
+
+    #[error("Invalid file version: found {0}, expected {1}")]
+    InvalidVersion(u8, u8),
 } 

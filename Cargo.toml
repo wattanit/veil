@@ -29,6 +29,10 @@ anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# Additional dependencies
+byteorder = "1.4"
+tempfile = "3.2"  # for tests
+
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5" 

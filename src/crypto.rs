@@ -22,6 +22,7 @@ const KEY_LENGTH: usize = 32;
 const NONCE_LENGTH: usize = 24;
 const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks for streaming
 
+#[derive(Clone)]
 pub struct CryptoManager {
     cipher: XChaCha20Poly1305,
 }
