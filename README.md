@@ -13,6 +13,7 @@ Veil - Secure File Encryption Tool
 ### TASK: Implement the crypto module with XChaCha20-Poly1305 and Argon2id
 
 - [X] Implement the streaming encryption/decryption in the fs module
-- [ ] Add the metadata encryption layer
+- [X] Add the metadata encryption layer
+- [ ] Add unit test to the metadata encryption layer
 - [ ] Implement secure memory wiping for sensitive data
 - [ ] Add more comprehensive tests including fuzz testing

@@ -10,6 +10,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use rand::{rngs::OsRng, RngCore};
+use serde::{Serialize, Deserialize};
 
 use crate::error::VeilError;
 
@@ -27,7 +28,7 @@ pub struct CryptoManager {
     cipher: XChaCha20Poly1305,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNonce {
     pub file_id: u64,
     pub chunk_counter: u64,
