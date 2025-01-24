@@ -28,7 +28,7 @@ pub struct CryptoManager {
     cipher: XChaCha20Poly1305,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FileNonce {
     pub file_id: u64,
     pub chunk_counter: u64,

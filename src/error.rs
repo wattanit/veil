@@ -37,6 +37,9 @@ pub enum VeilError {
 
     #[error("Invalid header")]
     InvalidHeader,
+
+    #[error("Invalid metadata")]
+    InvalidMetadata,
 }
 
 impl From<anyhow::Error> for VeilError {
