@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::crypto::{self, CryptoManager, FileNonce};
+use crate::crypto::{CryptoManager, FileNonce};
 use crate::error::VeilError;
 
 /// Represents the header for the metadata database.
@@ -131,6 +131,11 @@ impl MetadataDB {
     ///
     /// Returns a `Result` indicating success or failure as a `VeilError`.
     pub fn insert_file(&mut self, entry: FileEntry) -> Result<(), VeilError> {
+        // Check if a file with the same ID already exists
+        if self.db.contains_key(format!("file:{}", entry.id).as_bytes())? {
+            return Err(VeilError::Metadata("File already exists".to_string()));
+        }
+
         // Store the file entry itself
         let entry_bytes = bincode::serialize(&entry)?;
         let nonce = CryptoManager::generate_file_nonce(entry.id);
@@ -252,6 +257,108 @@ impl MetadataDB {
             Ok(None)
         }
     }
+
+    /// Removes a file entry from the metadata database.
+    ///
+    /// This function deletes the file entry, its path-to-ID mapping,
+    /// and updates the directory entries accordingly.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The unique identifier of the file to remove.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure as a `VeilError`.
+    pub fn remove_file(&mut self, id: u64) -> Result<(), VeilError> {
+        // Retrieve the file entry to get its original path
+        if let Some(encrypted_entry) = self.db.get(format!("file:{}", id).as_bytes())? {
+            let nonce_bytes = encrypted_entry.get(..24)
+                .ok_or(VeilError::InvalidMetadata)?;
+            let nonce: FileNonce = bincode::deserialize(nonce_bytes)?;
+            let entry_bytes = self.crypto.decrypt_chunk(&encrypted_entry[24..], &nonce)?;
+            let entry: FileEntry = bincode::deserialize(&entry_bytes)?;
+
+            // Remove the file entry
+            self.db.remove(format!("file:{}", id).as_bytes())?;
+
+            // Remove path-to-ID mapping
+            let path_key = format!("path:{}", entry.original_path);
+            self.db.remove(path_key.as_bytes())?;
+
+            // Update directory entries
+            let mut current_path = PathBuf::from(&entry.original_path);
+            while let Some(parent) = current_path.parent() {
+                if parent.to_string_lossy().is_empty() {
+                    break;
+                }
+
+                let dir_key = format!("dir:{}", parent.to_string_lossy());
+                if let Some(existing) = self.db.get(dir_key.as_bytes())? {
+                    let mut entries = String::from_utf8(existing.to_vec())
+                        .map_err(|_| VeilError::InvalidMetadata)?;
+                    let entry_name = current_path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string();
+
+                    // Remove the entry name from the directory
+                    entries = entries.lines()
+                        .filter(|&name| name != entry_name)
+                        .collect::<Vec<&str>>()
+                        .join("\n");
+
+                    self.db.insert(dir_key.as_bytes(), entries.as_bytes())?;
+                }
+
+                current_path = parent.to_path_buf();
+            }
+
+            Ok(())
+        } else {
+            Err(VeilError::Metadata("File not found".to_string()))
+        }
+    }
+
+    /// Updates an existing file entry in the metadata database.
+    ///
+    /// This function re-encrypts the updated file entry and stores it
+    /// back in the database.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The updated `FileEntry` to store.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure as a `VeilError`.
+    pub fn update_file(&mut self, entry: FileEntry) -> Result<(), VeilError> {
+        // Check if the original path is valid
+        if entry.original_path.is_empty() {
+            return Err(VeilError::Metadata("Invalid file path".to_string()));
+        }
+
+        // Serialize and encrypt the updated file entry
+        let entry_bytes = bincode::serialize(&entry)?;
+        let nonce = CryptoManager::generate_file_nonce(entry.id);
+        let encrypted_entry = self.crypto.encrypt_chunk(&entry_bytes, &nonce)?;
+
+        // Store the nonce alongside the encrypted data
+        let nonce_bytes = bincode::serialize(&nonce)?;
+        let mut full_entry = nonce_bytes;
+        full_entry.extend(encrypted_entry);
+
+        // Update the file entry in the database
+        self.db.insert(format!("file:{}", entry.id).as_bytes(), full_entry)?;
+
+        // Update the path-to-ID mapping
+        let path_key = format!("path:{}", entry.original_path);
+        self.db.insert(path_key.as_bytes(), entry.id.to_string().as_bytes())?;
+
+        // Update directory entries if the original path has changed
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -369,6 +476,166 @@ mod tests {
         let retrieved = db.get_file_by_path("test/file4.txt").unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().id, entry.id);
+    }
+
+    #[test]
+    fn test_remove_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_db");
+        let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
+
+        let entry = FileEntry {
+            id: 5,
+            original_path: String::from("test/file5.txt"),
+            size: 1500,
+            modified_time: 1620000004,
+            content_hash: [0; 32],
+            nonce: FileNonce {
+                file_id: 5,
+                chunk_counter: 0,
+                random: [0; 8],
+            },
+        };
+
+        db.insert_file(entry.clone()).unwrap();
+        assert!(db.get_file(5).unwrap().is_some()); // Ensure the file exists before removal
+
+        // Test removing the file
+        let result = db.remove_file(5);
+        assert!(result.is_ok());
+        assert!(db.get_file(5).unwrap().is_none()); // Ensure the file no longer exists
+    }
+
+    #[test]
+    fn test_update_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_db");
+        let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
+
+        let mut entry = FileEntry {
+            id: 6,
+            original_path: String::from("test/file6.txt"),
+            size: 2000,
+            modified_time: 1620000005,
+            content_hash: [0; 32],
+            nonce: FileNonce {
+                file_id: 6,
+                chunk_counter: 0,
+                random: [0; 8],
+            },
+        };
+
+        db.insert_file(entry.clone()).unwrap();
+
+        // Update the entry
+        entry.size = 2500; // Change the size
+        let result = db.update_file(entry.clone());
+        assert!(result.is_ok());
+
+        // Retrieve the updated entry
+        let updated_entry = db.get_file(6).unwrap().unwrap();
+        assert_eq!(updated_entry.size, 2500); // Ensure the size has been updated
+    }
+
+    #[test]
+    fn test_remove_nonexistent_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_db");
+        let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
+
+        // Attempt to remove a file that doesn't exist
+        let result = db.remove_file(999); // Assuming 999 does not exist
+        assert!(result.is_err());
+
+        // Check that the error is of the expected variant
+        if let Err(e) = result {
+            match e {
+                VeilError::Metadata(msg) => assert_eq!(msg, "File not found".to_string()),
+                _ => panic!("Expected Metadata error, got {:?}", e),
+            }
+        }
+    }
+
+    #[test]
+    fn test_update_file_with_invalid_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_db");
+        let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
+
+        let entry = FileEntry {
+            id: 7,
+            original_path: String::from("test/file7.txt"),
+            size: 2000,
+            modified_time: 1620000005,
+            content_hash: [0; 32],
+            nonce: FileNonce {
+                file_id: 7,
+                chunk_counter: 0,
+                random: [0; 8],
+            },
+        };
+
+        db.insert_file(entry.clone()).unwrap();
+
+        // Attempt to update with an invalid path
+        let mut updated_entry = entry.clone();
+        updated_entry.original_path = String::from(""); // Set to an empty string to simulate an invalid path
+
+        let result = db.update_file(updated_entry);
+        assert!(result.is_err());
+
+        // Check that the error is of the expected variant
+        if let Err(e) = result {
+            match e {
+                VeilError::Metadata(msg) => assert_eq!(msg, "Invalid file path".to_string()),
+                _ => panic!("Expected Metadata error, got {:?}", e),
+            }
+        }
+    }
+
+    #[test]
+    fn test_insert_file_with_duplicate_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_db");
+        let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
+
+        let entry1 = FileEntry {
+            id: 8,
+            original_path: String::from("test/file8.txt"),
+            size: 2000,
+            modified_time: 1620000005,
+            content_hash: [0; 32],
+            nonce: FileNonce {
+                file_id: 8,
+                chunk_counter: 0,
+                random: [0; 8],
+            },
+        };
+
+        let entry2 = FileEntry {
+            id: 8, // Same ID as entry1
+            original_path: String::from("test/file8_duplicate.txt"),
+            size: 3000,
+            modified_time: 1620000006,
+            content_hash: [0; 32],
+            nonce: FileNonce {
+                file_id: 8,
+                chunk_counter: 0,
+                random: [0; 8],
+            },
+        };
+
+        db.insert_file(entry1).unwrap();
+        let result = db.insert_file(entry2); // Attempt to insert with duplicate ID
+        assert!(result.is_err());
+
+        // Check that the error is of the expected variant
+        if let Err(e) = result {
+            match e {
+                VeilError::Metadata(msg) => assert_eq!(msg, "File already exists".to_string()), // Adjust this error as needed
+                _ => panic!("Expected Metadata error, got {:?}", e),
+            }
+        }
     }
 
     // Clean up the temporary directory after all tests
