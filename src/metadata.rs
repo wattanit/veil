@@ -1,9 +1,17 @@
+//! Metadata management for the Veil secure file encryption tool.
+//!
+//! This module handles the storage and retrieval of metadata related to
+//! encrypted files, including file entries and directory structures.
+//! It provides functionality to insert, retrieve, and list files in the
+//! encrypted repository.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::crypto::{self, CryptoManager, FileNonce};
 use crate::error::VeilError;
 
+/// Represents the header for the metadata database.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MetadataHeader {
     version: u8,
@@ -13,23 +21,39 @@ pub struct MetadataHeader {
     repo_id: [u8; 8],
 }
 
+/// Represents a file entry in the metadata database.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct FileEntry {
-    id: u64,                 // Unique identifier
+    id: u64,                 // Unique identifier for the file
     original_path: String,   // Original file path
-    size: u64,              // File size
-    modified_time: u64,      // Modification timestamp
-    content_hash: [u8; 32],  // Hash of the content (for integrity/identification)
-    nonce: FileNonce,        // Nonce used for the file encryption
+    size: u64,              // Size of the file in bytes
+    modified_time: u64,      // Last modification timestamp
+    content_hash: [u8; 32],  // Hash of the file content for integrity
+    nonce: FileNonce,        // Nonce used for file encryption
 }
 
+/// Represents the metadata database.
 pub struct MetadataDB {
-    db: sled::Db,
-    crypto: CryptoManager,
-    header: MetadataHeader,
+    db: sled::Db,            // The underlying sled database
+    crypto: CryptoManager,   // Crypto manager for encryption/decryption
+    header: MetadataHeader,  // Metadata header information
 }
 
 impl MetadataDB {
+    /// Creates a new `MetadataDB` instance.
+    ///
+    /// This function initializes the database at the specified path
+    /// and attempts to load an existing header. If no header exists,
+    /// a new one is created.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to the database.
+    /// * `password` - The master password for encryption.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the `MetadataDB` instance or a `VeilError`.
     pub fn new(path: PathBuf, password: &str) -> Result<Self, VeilError> {
         let db = sled::open(path)?;
         
@@ -94,6 +118,18 @@ impl MetadataDB {
         }
     }
 
+    /// Inserts a new file entry into the metadata database.
+    ///
+    /// This function encrypts the file entry and stores it in the database,
+    /// along with the path-to-ID mapping and directory entries for browsing.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The `FileEntry` to insert.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure as a `VeilError`.
     pub fn insert_file(&mut self, entry: FileEntry) -> Result<(), VeilError> {
         // Store the file entry itself
         let entry_bytes = bincode::serialize(&entry)?;
@@ -145,6 +181,17 @@ impl MetadataDB {
         Ok(())
     }
 
+    /// Retrieves a file entry by its unique identifier.
+    ///
+    /// This function decrypts the file entry using the stored nonce.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The unique identifier of the file.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing an `Option<FileEntry>` or a `VeilError`.
     pub fn get_file(&self, id: u64) -> Result<Option<FileEntry>, VeilError> {
         if let Some(encrypted_entry) = self.db.get(format!("file:{}", id).as_bytes())? {
             // First get the nonce that was used during encryption (first 24 bytes)
@@ -160,6 +207,17 @@ impl MetadataDB {
         }
     }
 
+    /// Lists the contents of a directory.
+    ///
+    /// This function retrieves the names of files in the specified directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path of the directory to list.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing a vector of file names or a `VeilError`.
     pub fn list_directory(&self, path: &str) -> Result<Vec<String>, VeilError> {
         let dir_key = format!("dir:{}", path);
         if let Some(entries) = self.db.get(dir_key.as_bytes())? {
@@ -171,6 +229,17 @@ impl MetadataDB {
         }
     }
 
+    /// Retrieves a file entry by its original path.
+    ///
+    /// This function looks up the file ID using the path and retrieves the file entry.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The original path of the file.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing an `Option<FileEntry>` or a `VeilError`.
     pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileEntry>, VeilError> {
         let path_key = format!("path:{}", path);
         if let Some(id_bytes) = self.db.get(path_key.as_bytes())? {
