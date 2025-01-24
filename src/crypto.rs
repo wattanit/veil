@@ -1,3 +1,44 @@
+//! Cryptographic operations for secure file encryption and decryption.
+//!
+//! This module provides the `CryptoManager` struct, which allows for secure
+//! encryption and decryption of data using the Argon2id password hashing
+//! algorithm for key derivation and the XChaCha20Poly1305 cipher for
+//! encryption. It also includes functionality for generating random salts
+//! and file nonces.
+//!
+//! # Overview
+//!
+//! The `CryptoManager` struct is initialized with a password and a salt,
+//! which are used to derive a secure encryption key. The module supports
+//! encrypting and decrypting data chunks, ensuring that the same password
+//! and salt will always produce the same key.
+//!
+//! # Usage
+//!
+//! To use this module, create an instance of `CryptoManager` with a password
+//! and a generated salt:
+//!
+//! ```rust
+//! let password = "your_password";
+//! let salt = CryptoManager::generate_salt();
+//! let crypto_manager = CryptoManager::new(password, &salt).unwrap();
+//! ```
+//!
+//! You can then encrypt and decrypt data using the `encrypt_chunk` and
+//! `decrypt_chunk` methods:
+//!
+//! ```rust
+//! let data = b"Sensitive data";
+//! let nonce = CryptoManager::generate_file_nonce(1);
+//!
+//! // Encrypt the data
+//! let encrypted_data = crypto_manager.encrypt_chunk(data, &nonce).unwrap();
+//!
+//! // Decrypt the data
+//! let decrypted_data = crypto_manager.decrypt_chunk(&encrypted_data, &nonce).unwrap();
+//! assert_eq!(data.as_ref(), decrypted_data.as_slice());
+//! ```
+
 use std::num::NonZeroU32;
 
 use anyhow::Context;
@@ -36,14 +77,39 @@ pub struct FileNonce {
 }
 
 impl CryptoManager {
-    /// Create a new CryptoManager with a derived key from password
+    /// Creates a new `CryptoManager` with a derived key from the provided password and salt.
+    ///
+    /// This function initializes the cipher using the derived key, allowing for
+    /// subsequent encryption and decryption operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `password` - The password used for key derivation.
+    /// * `salt` - The salt used for key derivation.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the `CryptoManager` instance or an `anyhow::Error`.
     pub fn new(password: &str, salt: &[u8]) -> anyhow::Result<Self> {
         let key = Self::derive_key(password, salt)?;
         let cipher = XChaCha20Poly1305::new(key.as_ref().into());
         Ok(Self { cipher })
     }
 
-    /// Derive an encryption key using Argon2id
+    /// Derives an encryption key using the Argon2id algorithm.
+    ///
+    /// This function takes a password and a salt, and produces a secure
+    /// encryption key of a fixed length.
+    ///
+    /// # Arguments
+    ///
+    /// * `password` - The password used for key derivation.
+    /// * `salt` - The salt used for key derivation.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the derived key as an array of bytes
+    /// or an `anyhow::Error`.
     fn derive_key(password: &str, salt: &[u8]) -> anyhow::Result<[u8; KEY_LENGTH]> {
         let salt = SaltString::encode_b64(salt)
             .map_err(|e| anyhow::anyhow!("Failed to encode salt: {}", e))?;
@@ -71,14 +137,33 @@ impl CryptoManager {
         Ok(key)
     }
 
-    /// Generate a new random salt
+    /// Generates a new random salt for key derivation.
+    ///
+    /// This function creates a random salt of a fixed length, which can be
+    /// used for deriving encryption keys.
+    ///
+    /// # Returns
+    ///
+    /// Returns a random salt as an array of bytes.
     pub fn generate_salt() -> [u8; SALT_LENGTH] {
         let mut salt = [0u8; SALT_LENGTH];
         OsRng.fill_bytes(&mut salt);
         salt
     }
 
-    /// Generate a new file nonce
+    /// Generates a new file nonce for encryption.
+    ///
+    /// This function creates a nonce that is unique to the specified file ID,
+    /// which is used during the encryption process to ensure security.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - The unique identifier for the file.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `FileNonce` instance containing the file ID, chunk counter,
+    /// and random bytes.
     pub fn generate_file_nonce(file_id: u64) -> FileNonce {
         let mut random = [0u8; 8];
         OsRng.fill_bytes(&mut random);
@@ -89,7 +174,18 @@ impl CryptoManager {
         }
     }
 
-    /// Convert FileNonce to XNonce for encryption
+    /// Converts a `FileNonce` to an `XNonce` for encryption.
+    ///
+    /// This function transforms the `FileNonce` structure into an `XNonce`
+    /// that can be used with the cipher for encryption and decryption.
+    ///
+    /// # Arguments
+    ///
+    /// * `nonce` - The `FileNonce` to convert.
+    ///
+    /// # Returns
+    ///
+    /// Returns an `XNonce` instance.
     fn file_nonce_to_xnonce(nonce: &FileNonce) -> XNonce {
         let mut bytes = [0u8; NONCE_LENGTH];
         bytes[0..8].copy_from_slice(&nonce.file_id.to_le_bytes());
@@ -98,7 +194,20 @@ impl CryptoManager {
         XNonce::from(bytes)
     }
 
-    /// Encrypt a chunk of data
+    /// Encrypts a chunk of data using the specified nonce.
+    ///
+    /// This function takes the data to be encrypted and a nonce, and returns
+    /// the encrypted data.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The data to encrypt.
+    /// * `nonce` - The nonce to use for encryption.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the encrypted data as a vector of bytes
+    /// or an `anyhow::Error`.
     pub fn encrypt_chunk(&self, data: &[u8], nonce: &FileNonce) -> anyhow::Result<Vec<u8>> {
         let xnonce = Self::file_nonce_to_xnonce(nonce);
         self.cipher
@@ -106,7 +215,20 @@ impl CryptoManager {
             .map_err(|e| VeilError::Encryption(e.to_string()).into())
     }
 
-    /// Decrypt a chunk of data
+    /// Decrypts a chunk of data using the specified nonce.
+    ///
+    /// This function takes the encrypted data and a nonce, and returns the
+    /// decrypted data.
+    ///
+    /// # Arguments
+    ///
+    /// * `encrypted_data` - The data to decrypt.
+    /// * `nonce` - The nonce used during encryption.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the decrypted data as a vector of bytes
+    /// or an `anyhow::Error`.
     pub fn decrypt_chunk(&self, encrypted_data: &[u8], nonce: &FileNonce) -> anyhow::Result<Vec<u8>> {
         let xnonce = Self::file_nonce_to_xnonce(nonce);
         self.cipher

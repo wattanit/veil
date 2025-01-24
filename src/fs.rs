@@ -1,4 +1,36 @@
-// Placeholder for filesystem operations 
+//! File system operations for the Veil secure file encryption tool.
+//!
+//! This module provides functionality for encrypting and decrypting files,
+//! as well as managing the reading and writing of encrypted data. It includes
+//! the `EncryptedFileWriter` and `EncryptedFileReader` structs for handling
+//! the encryption and decryption processes, respectively.
+//!
+//! # Overview
+//!
+//! The `EncryptedFileWriter` struct is responsible for writing encrypted data
+//! to a file, while the `EncryptedFileReader` struct is used to read and
+//! decrypt data from an encrypted file. Both structs utilize the `CryptoManager`
+//! for encryption and decryption operations.
+//!
+//! # Usage
+//!
+//! To encrypt a file, use the `encrypt_file` function:
+//!
+//! ```rust
+//! let source_path = "path/to/source.txt";
+//! let dest_path = "path/to/encrypted.enc";
+//! let crypto = CryptoManager::new("your_password", &CryptoManager::generate_salt()).unwrap();
+//! encrypt_file(source_path, dest_path, crypto, 1).unwrap();
+//! ```
+//!
+//! To decrypt a file, use the `decrypt_file` function:
+//!
+//! ```rust
+//! let source_path = "path/to/encrypted.enc";
+//! let dest_path = "path/to/decrypted.txt";
+//! let crypto = CryptoManager::new("your_password", &CryptoManager::generate_salt()).unwrap();
+//! decrypt_file(source_path, dest_path, crypto, 1).unwrap();
+//! ```
 
 use std::io::{self, Read, Write, Seek, SeekFrom};
 use std::fs::{self, File};
@@ -33,7 +65,7 @@ pub struct EncryptedFileWriter<W: Write + Seek> {
     current_chunk: Vec<u8>,
 }
 
-/// Reader for files written by EncryptedFileWriter.
+/// Reader for files written by `EncryptedFileWriter`.
 /// Handles the file format:
 /// ```text
 /// Header:
@@ -54,6 +86,21 @@ pub struct EncryptedFileReader<R: Read + Seek> {
 }
 
 impl<W: Write + Seek> EncryptedFileWriter<W> {
+    /// Creates a new `EncryptedFileWriter` instance.
+    ///
+    /// This function initializes the writer with the specified writer,
+    /// crypto manager, and file ID. It writes the version byte and generates
+    /// a random nonce for encryption.
+    ///
+    /// # Arguments
+    ///
+    /// * `writer` - The writer to which encrypted data will be written.
+    /// * `crypto` - The `CryptoManager` instance for encryption.
+    /// * `file_id` - The unique identifier for the file.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the `EncryptedFileWriter` instance or an `io::Error`.
     pub fn new(mut writer: W, crypto: CryptoManager, file_id: u64) -> io::Result<Self> {
         // Write version byte
         writer.write_all(&[VERSION])?;
@@ -70,6 +117,17 @@ impl<W: Write + Seek> EncryptedFileWriter<W> {
         })
     }
 
+    /// Writes a buffer of data to the encrypted file.
+    ///
+    /// This function encrypts the data and writes it in chunks to the file.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - The buffer containing the data to write.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the number of bytes written or an `io::Error`.
     pub fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut bytes_written = 0;
         let mut remaining = buf;
@@ -91,6 +149,14 @@ impl<W: Write + Seek> EncryptedFileWriter<W> {
         Ok(bytes_written)
     }
 
+    /// Flushes the current chunk of data to the file.
+    ///
+    /// This function encrypts the current chunk and writes it to the file,
+    /// including the encrypted length and original length.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure as an `io::Error`.
     fn flush_chunk(&mut self) -> io::Result<()> {
         if self.current_chunk.is_empty() {
             return Ok(());
@@ -113,6 +179,14 @@ impl<W: Write + Seek> EncryptedFileWriter<W> {
         Ok(())
     }
 
+    /// Finalizes the writing process and flushes any remaining data.
+    ///
+    /// This function ensures that all data is written to the file and flushes
+    /// the writer.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure as an `io::Error`.
     pub fn finish(mut self) -> io::Result<()> {
         // Flush any remaining data
         self.flush_chunk()?;
@@ -121,6 +195,22 @@ impl<W: Write + Seek> EncryptedFileWriter<W> {
 }
 
 impl<R: Read + Seek> EncryptedFileReader<R> {
+    /// Creates a new `EncryptedFileReader` instance.
+    ///
+    /// This function initializes the reader with the specified reader,
+    /// crypto manager, file ID, and file size. It reads the version byte
+    /// and nonce from the file.
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - The reader from which encrypted data will be read.
+    /// * `crypto` - The `CryptoManager` instance for decryption.
+    /// * `file_id` - The unique identifier for the file.
+    /// * `file_size` - The total size of the encrypted file.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the `EncryptedFileReader` instance or an `io::Error`.
     pub fn new(
         mut reader: R,
         crypto: CryptoManager, 
@@ -156,6 +246,18 @@ impl<R: Read + Seek> EncryptedFileReader<R> {
         })
     }
 
+    /// Reads decrypted data from the encrypted file into the provided buffer.
+    ///
+    /// This function decrypts the next chunk of data and fills the buffer
+    /// with the decrypted content.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - The buffer to fill with decrypted data.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the number of bytes read or an `io::Error`.
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.current_position >= self.file_size {
             return Ok(0);
@@ -191,7 +293,7 @@ impl<R: Read + Seek> EncryptedFileReader<R> {
     }
 }
 
-/// Encrypts a file to a new location, preserving the original
+/// Encrypts a file to a new location, preserving the original.
 pub fn encrypt_file<P: AsRef<Path>>(
     source_path: P,
     dest_path: P,
@@ -219,7 +321,7 @@ pub fn encrypt_file<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Decrypts a file to a new location, preserving the encrypted file
+/// Decrypts a file to a new location, preserving the encrypted file.
 pub fn decrypt_file<P: AsRef<Path>>(
     source_path: P,
     dest_path: P,

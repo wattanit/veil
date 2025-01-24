@@ -4,6 +4,40 @@
 //! encrypted files, including file entries and directory structures.
 //! It provides functionality to insert, retrieve, and list files in the
 //! encrypted repository.
+//!
+//! # Overview
+//!
+//! The `MetadataDB` struct manages the metadata for encrypted files,
+//! allowing for secure storage and retrieval of file entries. It uses
+//! the `CryptoManager` for encryption and decryption of metadata.
+//!
+//! # Usage
+//!
+//! To use this module, create an instance of `MetadataDB` with a path
+//! and a master password:
+//!
+//! ```rust
+//! let db = MetadataDB::new(PathBuf::from("path/to/db"), "your_password").unwrap();
+//! ```
+//!
+//! You can then insert, retrieve, and manage file entries:
+//!
+//! ```rust
+//! let entry = FileEntry {
+//!     id: 1,
+//!     original_path: String::from("test/file.txt"),
+//!     size: 1234,
+//!     modified_time: 1620000000,
+//!     content_hash: [0; 32],
+//!     nonce: FileNonce {
+//!         file_id: 1,
+//!         chunk_counter: 0,
+//!         random: [0; 8],
+//!     },
+//! };
+//! db.insert_file(entry).unwrap();
+//! ```
+
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
