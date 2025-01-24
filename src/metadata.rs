@@ -58,12 +58,12 @@ pub struct MetadataHeader {
 /// Represents a file entry in the metadata database.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct FileEntry {
-    id: u64,                 // Unique identifier for the file
-    original_path: String,   // Original file path
-    size: u64,              // Size of the file in bytes
-    modified_time: u64,      // Last modification timestamp
-    content_hash: [u8; 32],  // Hash of the file content for integrity
-    nonce: FileNonce,        // Nonce used for file encryption
+    pub id: u64,                 // Unique identifier for the file
+    pub original_path: String,   // Original file path
+    pub size: u64,              // Size of the file in bytes
+    pub modified_time: u64,      // Last modification timestamp
+    pub content_hash: [u8; 32],  // Hash of the file content for integrity
+    pub nonce: FileNonce,        // Nonce used for file encryption
 }
 
 /// Represents the metadata database.
@@ -392,6 +392,19 @@ impl MetadataDB {
 
         // Update directory entries if the original path has changed
         Ok(())
+    }
+
+    /// Retrieves the `CryptoManager` instance used for encryption and decryption.
+    ///
+    /// This function provides access to the `CryptoManager` that was initialized
+    /// with the `MetadataDB`. It can be used to perform encryption or decryption
+    /// operations on data related to the metadata.
+    ///
+    /// # Returns
+    ///
+    /// Returns a cloned instance of `CryptoManager`.
+    pub fn get_crypto_manager(&self) -> CryptoManager {
+        self.crypto.clone()
     }
 }
 

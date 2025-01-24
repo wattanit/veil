@@ -1,6 +1,10 @@
 use clap::{Parser, Subcommand};
 
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
+use std::fs;
+use crate::metadata::{MetadataDB, FileEntry};
+use crate::crypto::{CryptoManager, FileNonce};
+use crate::fs::encrypt_file;
 
 const VEIL_VERSION: &str = "0.1.0";
 const PASSWORD_MIN_LENGTH: usize = 8;
@@ -129,9 +133,139 @@ impl Cli {
     }
 
     fn handle_add(&self, source_path: &PathBuf, target_path: &Option<PathBuf>) -> anyhow::Result<()> {
-        // Implementation for add command
-        println!("Adding {:?} to repository", source_path);
+        // Get repository root and verify it exists
+        let repo_root = self.find_repository_root()?;
+        let repo_path = repo_root.join(".veil");
+        
+        if !self.quiet {
+            println!("Adding {:?} to repository", source_path);
+        }
+
+        // Get password for metadata DB
+        let password = rpassword::prompt_password("Enter repository password: ")?;
+        
+        // Open metadata DB
+        let mut db = MetadataDB::new(repo_path.join(".metadata.db"), &password)?;
+        
+        // Determine target path within repository
+        let relative_target = match target_path {
+            Some(target) => target.clone(),
+            None => source_path.to_path_buf(),
+        };
+        
+        // Process the source path (handles both files and directories)
+        self.add_path(&source_path, &relative_target, &repo_path, &mut db)?;
+        
+        if self.verbose {
+            println!("Successfully added {:?} to repository", source_path);
+        }
+        
         Ok(())
+    }
+
+    fn add_path(
+        &self,
+        source: &Path,
+        target: &Path,
+        repo_path: &Path,
+        db: &mut MetadataDB
+    ) -> anyhow::Result<()> {
+        if source.is_dir() {
+            self.add_directory(source, target, repo_path, db)
+        } else {
+            self.add_file(source, target, repo_path, db)
+        }
+    }
+
+    fn add_file(
+        &self,
+        source: &Path,
+        target: &Path,
+        repo_path: &Path,
+        db: &mut MetadataDB
+    ) -> anyhow::Result<()> {
+        if self.verbose {
+            println!("Processing file: {:?}", source);
+        }
+
+        // Generate a unique ID for the file
+        let file_id = rand::random::<u64>();
+        
+        // Calculate content hash
+        let mut hasher = blake3::Hasher::new();
+        let mut file = fs::File::open(source)?;
+        std::io::copy(&mut file, &mut hasher)?;
+        let content_hash = hasher.finalize().into();
+
+        // Create file entry
+        let metadata = fs::metadata(source)?;
+        let entry = FileEntry {
+            id: file_id,
+            original_path: target.to_string_lossy().into_owned(),
+            size: metadata.len(),
+            modified_time: metadata
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
+            content_hash,
+            nonce: FileNonce {
+                file_id,
+                chunk_counter: 0,
+                random: [0; 8], // Will be generated during encryption
+            },
+        };
+
+        // Encrypt the file
+        let dest_path = repo_path.join("contents").join(format!("{}.enc", file_id));
+        encrypt_file(
+            source,
+            &dest_path,
+            db.get_crypto_manager(),
+            file_id,
+        )?;
+
+        // Add to metadata DB
+        db.insert_file(entry)?;
+
+        Ok(())
+    }
+
+    fn add_directory(
+        &self,
+        source: &Path,
+        target: &Path,
+        repo_path: &Path,
+        db: &mut MetadataDB
+    ) -> anyhow::Result<()> {
+        if self.verbose {
+            println!("Processing directory: {:?}", source);
+        }
+
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let relative_path = target.join(
+                entry.file_name()
+            );
+            
+            self.add_path(&source_path, &relative_path, repo_path, db)?;
+        }
+
+        Ok(())
+    }
+
+    fn find_repository_root(&self) -> anyhow::Result<PathBuf> {
+        let mut current = std::env::current_dir()?;
+        
+        loop {
+            if current.join(".veil").is_dir() {
+                return Ok(current);
+            }
+            
+            if !current.pop() {
+                anyhow::bail!("Not in a Veil repository");
+            }
+        }
     }
 
     fn handle_ls(&self, path: &Option<PathBuf>) -> anyhow::Result<()> {
