@@ -1,3 +1,31 @@
+//! Metadata management for the Veil secure file encryption tool.
+//!
+//! This module provides functionality for managing encrypted file metadata,
+//! including file entries, virtual paths, and directory structures. It uses
+//! an encrypted sled database to store metadata securely.
+//!
+//! # Overview
+//!
+//! The metadata system consists of three main components:
+//! - `MetadataHeader`: Contains repository-wide information
+//! - `FileEntry`: Represents individual encrypted file metadata
+//! - `MetadataDB`: Manages the encrypted metadata database
+//!
+//! # Usage
+//!
+//! To create or open a metadata database:
+//!
+//! ```rust
+//! use std::path::PathBuf;
+//! let db = MetadataDB::new(PathBuf::from("path/to/db"), "password")?;
+//! ```
+//!
+//! To add a new file:
+//!
+//! ```rust
+//! db.insert_file("source/path.txt", "virtual/path.txt")?;
+//! ```
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -5,6 +33,13 @@ use crate::crypto::{CryptoManager, FileNonce};
 use crate::error::VeilError;
 
 /// Represents the header for the metadata database.
+/// 
+/// The header contains repository-wide information including:
+/// - Version number for format compatibility
+/// - Creation timestamp
+/// - Cryptographic salt
+/// - Nonce counter for unique nonce generation
+/// - Repository identifier
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MetadataHeader {
     version: u8,
@@ -15,6 +50,13 @@ pub struct MetadataHeader {
 }
 
 /// Represents a file entry in the metadata database.
+/// 
+/// Each entry contains all necessary information about an encrypted file:
+/// - Unique identifier
+/// - Virtual and source paths
+/// - File size and modification time
+/// - Content hash for integrity verification
+/// - Encryption nonce
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct FileEntry {
     pub id: u64,                 // Unique identifier for the file
@@ -26,7 +68,10 @@ pub struct FileEntry {
     pub nonce: FileNonce,        // Nonce used for file encryption
 }
 
-/// Represents the metadata database.
+/// Manages the encrypted metadata database.
+/// 
+/// The MetadataDB provides a secure interface for storing and retrieving
+/// file metadata, managing virtual paths, and maintaining directory structures.
 pub struct MetadataDB {
     db: sled::Db,            // The underlying sled database
     crypto: CryptoManager,   // Crypto manager for encryption/decryption
@@ -35,6 +80,20 @@ pub struct MetadataDB {
 
 impl MetadataDB {
 
+    /// Creates a new or opens an existing metadata database.
+    ///
+    /// This function will either initialize a new metadata database with the given
+    /// password or open an existing one. For existing databases, the password must
+    /// match the one used during creation.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path where the metadata database should be stored
+    /// * `password` - The password used for encryption/decryption
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the `MetadataDB` instance or a `VeilError`.
     pub fn new(path: PathBuf, password: &str) -> Result<Self, VeilError> {
         let db = sled::open(path)?;
         
@@ -99,6 +158,19 @@ impl MetadataDB {
         }
     }
 
+    /// Inserts a new file entry into the metadata database.
+    ///
+    /// This function creates a new file entry and updates all necessary indexes
+    /// including virtual path mappings and directory structures.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_path` - The original path of the file being encrypted
+    /// * `virtual_path` - The virtual path where the file will appear in the repository
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or a `VeilError`.
     pub fn insert_file(&mut self, source_path: &str, virtual_path: &str) -> Result<(), VeilError> {
         // Check if a file with the same virtual path already exists
         if self.db.contains_key(format!("vpath:{}", virtual_path).as_bytes())? {
@@ -168,24 +240,15 @@ impl MetadataDB {
         Ok(())
     }
 
-    // Helper method to generate next available ID
-    fn generate_next_id(&mut self) -> Result<u64, VeilError> {
-        let counter_key = "id_counter";
-        let next_id = match self.db.get(counter_key)? {
-            Some(bytes) => {
-                let current: u64 = String::from_utf8(bytes.to_vec())
-                    .map_err(|_| VeilError::InvalidMetadata)?
-                    .parse()
-                    .map_err(|_| VeilError::InvalidMetadata)?;
-                current + 1
-            }
-            None => 1,
-        };
-        
-        self.db.insert(counter_key, next_id.to_string().as_bytes())?;
-        Ok(next_id)
-    }
-
+    /// Retrieves a file entry by its unique identifier.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The unique identifier of the file entry
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing an `Option<FileEntry>` or a `VeilError`.
     pub fn get_file(&self, id: u64) -> Result<Option<FileEntry>, VeilError> {
         if let Some(encrypted_entry) = self.db.get(format!("file:{}", id).as_bytes())? {
             // First get the nonce that was used during encryption (first 24 bytes)
@@ -201,6 +264,15 @@ impl MetadataDB {
         }
     }
 
+    /// Lists all entries in a virtual directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The virtual path of the directory to list
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing a vector of entry names or a `VeilError`.
     pub fn list_directory(&self, path: &str) -> Result<Vec<String>, VeilError> {
         let dir_key = format!("dir:{}", path);
         if let Some(entries) = self.db.get(dir_key.as_bytes())? {
@@ -212,6 +284,15 @@ impl MetadataDB {
         }
     }
 
+    /// Retrieves a file entry by its virtual path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The virtual path of the file
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing an `Option<FileEntry>` or a `VeilError`.
     pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileEntry>, VeilError> {
         let path_key = format!("vpath:{}", path);
         if let Some(id_bytes) = self.db.get(path_key.as_bytes())? {
@@ -225,6 +306,18 @@ impl MetadataDB {
         }
     }
 
+    /// Removes a file entry and all associated metadata.
+    ///
+    /// This function removes the file entry and updates all necessary indexes
+    /// including virtual path mappings and directory structures.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The unique identifier of the file to remove
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or a `VeilError`.
     pub fn remove_file(&mut self, id: u64) -> Result<(), VeilError> {
         // Retrieve the file entry to get its original path
         if let Some(encrypted_entry) = self.db.get(format!("file:{}", id).as_bytes())? {
@@ -276,6 +369,15 @@ impl MetadataDB {
         }
     }
 
+    /// Updates an existing file entry with new metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The updated file entry
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or a `VeilError`.
     pub fn update_file(&mut self, entry: FileEntry) -> Result<(), VeilError> {
         // Check if the virtual path is valid
         if entry.virtual_path.is_empty() {
@@ -305,8 +407,37 @@ impl MetadataDB {
         Ok(())
     }
 
+    /// Returns a clone of the crypto manager used by this database.
+    ///
+    /// This allows other components to use the same encryption settings
+    /// when working with file contents.
     pub fn get_crypto_manager(&self) -> CryptoManager {
         self.crypto.clone()
+    }
+
+    /// Generates the next available unique identifier for file entries.
+    ///
+    /// This is an internal helper method that manages the ID counter
+    /// in the database.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the next available ID or a `VeilError`.
+    fn generate_next_id(&mut self) -> Result<u64, VeilError> {
+        let counter_key = "id_counter";
+        let next_id = match self.db.get(counter_key)? {
+            Some(bytes) => {
+                let current: u64 = String::from_utf8(bytes.to_vec())
+                    .map_err(|_| VeilError::InvalidMetadata)?
+                    .parse()
+                    .map_err(|_| VeilError::InvalidMetadata)?;
+                current + 1
+            }
+            None => 1,
+        };
+        
+        self.db.insert(counter_key, next_id.to_string().as_bytes())?;
+        Ok(next_id)
     }
 }
 
