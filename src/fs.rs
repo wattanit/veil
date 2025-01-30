@@ -32,15 +32,14 @@
 //! decrypt_file(source_path, dest_path, crypto, 1).unwrap();
 //! ```
 
-use std::io::{self, Read, Write, Seek, SeekFrom};
-use std::fs::{self, File};
+use std::io::{self, Read, Write, Seek};
+use std::fs::File;
 use std::path::Path;
 
 use anyhow::Context;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::crypto::{CryptoManager, FileNonce};
-use crate::error::VeilError;
 
 const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
 const VERSION: u8 = 1;
@@ -302,7 +301,7 @@ pub fn encrypt_file<P: AsRef<Path>>(
 ) -> anyhow::Result<()> {
     let source_file = File::open(&source_path)
         .context("Failed to open source file")?;
-    let mut dest_file = File::create(&dest_path)
+    let dest_file = File::create(&dest_path)
         .context("Failed to create destination file")?;
 
     let mut writer = EncryptedFileWriter::new(dest_file, crypto, file_id)?;
@@ -330,7 +329,7 @@ pub fn decrypt_file<P: AsRef<Path>>(
 ) -> anyhow::Result<()> {
     let source_file = File::open(&source_path)
         .context("Failed to open encrypted file")?;
-    let mut dest_file = File::create(&dest_path)
+    let dest_file = File::create(&dest_path)
         .context("Failed to create destination file")?;
 
     let file_size = source_file.metadata()?.len();
@@ -354,6 +353,7 @@ pub fn decrypt_file<P: AsRef<Path>>(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use std::fs;
 
     #[test]
     fn test_encrypt_decrypt_stream() -> anyhow::Result<()> {

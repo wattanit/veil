@@ -39,12 +39,9 @@
 //! assert_eq!(data.as_ref(), decrypted_data.as_slice());
 //! ```
 
-use std::num::NonZeroU32;
-
-use anyhow::Context;
 use argon2::{
     password_hash::{PasswordHasher, SaltString},
-    Argon2, Params, PasswordHash,
+    Argon2, Params,
 };
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -62,7 +59,6 @@ const PARALLELISM: u32 = 4;
 const SALT_LENGTH: usize = 16;
 const KEY_LENGTH: usize = 32;
 const NONCE_LENGTH: usize = 24;
-const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks for streaming
 
 #[derive(Clone)]
 pub struct CryptoManager {

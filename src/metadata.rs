@@ -75,6 +75,7 @@ pub struct FileEntry {
 pub struct MetadataDB {
     db: sled::Db,            // The underlying sled database
     crypto: CryptoManager,   // Crypto manager for encryption/decryption
+    #[allow(dead_code)]
     header: MetadataHeader,  // Metadata header information
 }
 
@@ -411,31 +412,6 @@ impl MetadataDB {
     /// when working with file contents.
     pub fn get_crypto_manager(&self) -> CryptoManager {
         self.crypto.clone()
-    }
-
-    /// Generates the next available unique identifier for file entries.
-    ///
-    /// This is an internal helper method that manages the ID counter
-    /// in the database.
-    ///
-    /// # Returns
-    ///
-    /// Returns a `Result` containing the next available ID or a `VeilError`.
-    fn generate_next_id(&mut self) -> Result<u64, VeilError> {
-        let counter_key = "id_counter";
-        let next_id = match self.db.get(counter_key)? {
-            Some(bytes) => {
-                let current: u64 = String::from_utf8(bytes.to_vec())
-                    .map_err(|_| VeilError::InvalidMetadata)?
-                    .parse()
-                    .map_err(|_| VeilError::InvalidMetadata)?;
-                current + 1
-            }
-            None => 1,
-        };
-        
-        self.db.insert(counter_key, next_id.to_string().as_bytes())?;
-        Ok(next_id)
     }
 }
 

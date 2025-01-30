@@ -39,7 +39,6 @@ use clap::{Parser, Subcommand};
 use std::path::{PathBuf, Path};
 use std::fs;
 use crate::metadata::{MetadataDB, FileEntry};
-use crate::crypto::{CryptoManager, FileNonce};
 use crate::fs::encrypt_file;
 use std::io::{BufRead, BufReader, Write};
 use std::collections::HashSet;
@@ -102,9 +101,6 @@ enum Commands {
         /// Allow modifications to decrypted files
         #[arg(long)]
         writable: bool,
-        /// Auto-clean after specified minutes
-        #[arg(long)]
-        timeout: Option<u32>,
     },
 }
 
@@ -125,7 +121,7 @@ impl Cli {
             Commands::Add { source_path, target_path } => self.handle_add(source_path, target_path),
             Commands::Ls { path } => self.handle_ls(path),
             Commands::Find { pattern } => self.handle_find(pattern),
-            Commands::Unlock { path, writable, timeout } => self.handle_unlock(path, writable, timeout),
+            Commands::Unlock { path, writable } => self.handle_unlock(path, writable),
         }
     }
 
@@ -669,7 +665,7 @@ impl Cli {
     /// # Returns
     ///
     /// Returns a `Result` indicating success or failure of the unlock operation.
-    fn handle_unlock(&self, path: &PathBuf, writable: &bool, timeout: &Option<u32>) -> anyhow::Result<()> {
+    fn handle_unlock(&self, path: &PathBuf, writable: &bool) -> anyhow::Result<()> {
         // Get repository root and verify it exists
         let repo_root = self.find_repository_root()?;
         let repo_path = repo_root.join(".veil");
