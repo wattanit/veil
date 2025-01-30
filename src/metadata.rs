@@ -1,44 +1,3 @@
-//! Metadata management for the Veil secure file encryption tool.
-//!
-//! This module handles the storage and retrieval of metadata related to
-//! encrypted files, including file entries and directory structures.
-//! It provides functionality to insert, retrieve, and list files in the
-//! encrypted repository.
-//!
-//! # Overview
-//!
-//! The `MetadataDB` struct manages the metadata for encrypted files,
-//! allowing for secure storage and retrieval of file entries. It uses
-//! the `CryptoManager` for encryption and decryption of metadata.
-//!
-//! # Usage
-//!
-//! To use this module, create an instance of `MetadataDB` with a path
-//! and a master password:
-//!
-//! ```rust
-//! let db = MetadataDB::new(PathBuf::from("path/to/db"), "your_password").unwrap();
-//! ```
-//!
-//! You can then insert, retrieve, and manage file entries:
-//!
-//! ```rust
-//! let entry = FileEntry {
-//!     id: 1,
-//!     original_path: String::from("test/file.txt"),
-//!     size: 1234,
-//!     modified_time: 1620000000,
-//!     content_hash: [0; 32],
-//!     nonce: FileNonce {
-//!         file_id: 1,
-//!         chunk_counter: 0,
-//!         random: [0; 8],
-//!     },
-//! };
-//! db.insert_file(entry).unwrap();
-//! ```
-
-
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -59,7 +18,8 @@ pub struct MetadataHeader {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct FileEntry {
     pub id: u64,                 // Unique identifier for the file
-    pub original_path: String,   // Original file path
+    pub virtual_path: String,    // Path in our virtual filesystem
+    pub source_path: String,     // Original source path (for reference only)
     pub size: u64,              // Size of the file in bytes
     pub modified_time: u64,      // Last modification timestamp
     pub content_hash: [u8; 32],  // Hash of the file content for integrity
@@ -74,20 +34,7 @@ pub struct MetadataDB {
 }
 
 impl MetadataDB {
-    /// Creates a new `MetadataDB` instance.
-    ///
-    /// This function initializes the database at the specified path
-    /// and attempts to load an existing header. If no header exists,
-    /// a new one is created.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The path to the database.
-    /// * `password` - The master password for encryption.
-    ///
-    /// # Returns
-    ///
-    /// Returns a `Result` containing the `MetadataDB` instance or a `VeilError`.
+
     pub fn new(path: PathBuf, password: &str) -> Result<Self, VeilError> {
         let db = sled::open(path)?;
         
@@ -152,29 +99,30 @@ impl MetadataDB {
         }
     }
 
-    /// Inserts a new file entry into the metadata database.
-    ///
-    /// This function encrypts the file entry and stores it in the database,
-    /// along with the path-to-ID mapping and directory entries for browsing.
-    ///
-    /// # Arguments
-    ///
-    /// * `entry` - The `FileEntry` to insert.
-    ///
-    /// # Returns
-    ///
-    /// Returns a `Result` indicating success or failure as a `VeilError`.
-    pub fn insert_file(&mut self, entry: FileEntry) -> Result<(), VeilError> {
-        // Check if a file with the same ID already exists
-        if self.db.contains_key(format!("file:{}", entry.id).as_bytes())? {
+    pub fn insert_file(&mut self, source_path: &str, virtual_path: &str) -> Result<(), VeilError> {
+        // Check if a file with the same virtual path already exists
+        if self.db.contains_key(format!("vpath:{}", virtual_path).as_bytes())? {
             return Err(VeilError::Metadata("File already exists".to_string()));
         }
+
+        let id = self.generate_next_id()?;
+        
+        let entry = FileEntry {
+            id,
+            virtual_path: virtual_path.to_string(),
+            source_path: source_path.to_string(), // Keep original path for reference
+            size: std::fs::metadata(source_path)?.len(),
+            modified_time: SystemTime::now()
+                .duration_since(UNIX_EPOCH)?
+                .as_secs(),
+            content_hash: [0; 32], // You'll need to calculate this
+            nonce: CryptoManager::generate_file_nonce(id),
+        };
 
         // Store the file entry itself
         let entry_bytes = bincode::serialize(&entry)?;
         let nonce = CryptoManager::generate_file_nonce(entry.id);
         
-        // Store nonce alongside encrypted data
         let nonce_bytes = bincode::serialize(&nonce)?;
         let encrypted_entry = self.crypto.encrypt_chunk(&entry_bytes, &nonce)?;
         
@@ -183,12 +131,12 @@ impl MetadataDB {
         
         self.db.insert(format!("file:{}", entry.id).as_bytes(), full_entry)?;
 
-        // Store path-to-id mapping for browsing
-        let path_key = format!("path:{}", entry.original_path);
+        // Store virtual path mapping
+        let path_key = format!("vpath:{}", entry.virtual_path);
         self.db.insert(path_key.as_bytes(), entry.id.to_string().as_bytes())?;
 
-        // Store directory entries for browsing
-        let mut current_path = PathBuf::from(&entry.original_path);
+        // Store directory entries for virtual path browsing
+        let mut current_path = PathBuf::from(&entry.virtual_path);
         while let Some(parent) = current_path.parent() {
             if parent.to_string_lossy().is_empty() {
                 break;
@@ -220,17 +168,24 @@ impl MetadataDB {
         Ok(())
     }
 
-    /// Retrieves a file entry by its unique identifier.
-    ///
-    /// This function decrypts the file entry using the stored nonce.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The unique identifier of the file.
-    ///
-    /// # Returns
-    ///
-    /// Returns a `Result` containing an `Option<FileEntry>` or a `VeilError`.
+    // Helper method to generate next available ID
+    fn generate_next_id(&mut self) -> Result<u64, VeilError> {
+        let counter_key = "id_counter";
+        let next_id = match self.db.get(counter_key)? {
+            Some(bytes) => {
+                let current: u64 = String::from_utf8(bytes.to_vec())
+                    .map_err(|_| VeilError::InvalidMetadata)?
+                    .parse()
+                    .map_err(|_| VeilError::InvalidMetadata)?;
+                current + 1
+            }
+            None => 1,
+        };
+        
+        self.db.insert(counter_key, next_id.to_string().as_bytes())?;
+        Ok(next_id)
+    }
+
     pub fn get_file(&self, id: u64) -> Result<Option<FileEntry>, VeilError> {
         if let Some(encrypted_entry) = self.db.get(format!("file:{}", id).as_bytes())? {
             // First get the nonce that was used during encryption (first 24 bytes)
@@ -246,17 +201,6 @@ impl MetadataDB {
         }
     }
 
-    /// Lists the contents of a directory.
-    ///
-    /// This function retrieves the names of files in the specified directory.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The path of the directory to list.
-    ///
-    /// # Returns
-    ///
-    /// Returns a `Result` containing a vector of file names or a `VeilError`.
     pub fn list_directory(&self, path: &str) -> Result<Vec<String>, VeilError> {
         let dir_key = format!("dir:{}", path);
         if let Some(entries) = self.db.get(dir_key.as_bytes())? {
@@ -268,19 +212,8 @@ impl MetadataDB {
         }
     }
 
-    /// Retrieves a file entry by its original path.
-    ///
-    /// This function looks up the file ID using the path and retrieves the file entry.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The original path of the file.
-    ///
-    /// # Returns
-    ///
-    /// Returns a `Result` containing an `Option<FileEntry>` or a `VeilError`.
     pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileEntry>, VeilError> {
-        let path_key = format!("path:{}", path);
+        let path_key = format!("vpath:{}", path);
         if let Some(id_bytes) = self.db.get(path_key.as_bytes())? {
             let id = String::from_utf8(id_bytes.to_vec())
                 .map_err(|_| VeilError::InvalidMetadata)?
@@ -292,18 +225,6 @@ impl MetadataDB {
         }
     }
 
-    /// Removes a file entry from the metadata database.
-    ///
-    /// This function deletes the file entry, its path-to-ID mapping,
-    /// and updates the directory entries accordingly.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The unique identifier of the file to remove.
-    ///
-    /// # Returns
-    ///
-    /// Returns a `Result` indicating success or failure as a `VeilError`.
     pub fn remove_file(&mut self, id: u64) -> Result<(), VeilError> {
         // Retrieve the file entry to get its original path
         if let Some(encrypted_entry) = self.db.get(format!("file:{}", id).as_bytes())? {
@@ -317,11 +238,11 @@ impl MetadataDB {
             self.db.remove(format!("file:{}", id).as_bytes())?;
 
             // Remove path-to-ID mapping
-            let path_key = format!("path:{}", entry.original_path);
+            let path_key = format!("vpath:{}", entry.virtual_path);
             self.db.remove(path_key.as_bytes())?;
 
             // Update directory entries
-            let mut current_path = PathBuf::from(&entry.original_path);
+            let mut current_path = PathBuf::from(&entry.virtual_path);
             while let Some(parent) = current_path.parent() {
                 if parent.to_string_lossy().is_empty() {
                     break;
@@ -355,22 +276,10 @@ impl MetadataDB {
         }
     }
 
-    /// Updates an existing file entry in the metadata database.
-    ///
-    /// This function re-encrypts the updated file entry and stores it
-    /// back in the database.
-    ///
-    /// # Arguments
-    ///
-    /// * `entry` - The updated `FileEntry` to store.
-    ///
-    /// # Returns
-    ///
-    /// Returns a `Result` indicating success or failure as a `VeilError`.
     pub fn update_file(&mut self, entry: FileEntry) -> Result<(), VeilError> {
-        // Check if the original path is valid
-        if entry.original_path.is_empty() {
-            return Err(VeilError::Metadata("Invalid file path".to_string()));
+        // Check if the virtual path is valid
+        if entry.virtual_path.is_empty() {
+            return Err(VeilError::Metadata("Invalid virtual path".to_string()));
         }
 
         // Serialize and encrypt the updated file entry
@@ -386,23 +295,16 @@ impl MetadataDB {
         // Update the file entry in the database
         self.db.insert(format!("file:{}", entry.id).as_bytes(), full_entry)?;
 
-        // Update the path-to-ID mapping
-        let path_key = format!("path:{}", entry.original_path);
+        // Update the virtual path mapping
+        let path_key = format!("vpath:{}", entry.virtual_path);
         self.db.insert(path_key.as_bytes(), entry.id.to_string().as_bytes())?;
 
-        // Update directory entries if the original path has changed
+        // Update directory entries if the virtual path has changed
+        // (You may want to implement additional logic here if needed)
+
         Ok(())
     }
 
-    /// Retrieves the `CryptoManager` instance used for encryption and decryption.
-    ///
-    /// This function provides access to the `CryptoManager` that was initialized
-    /// with the `MetadataDB`. It can be used to perform encryption or decryption
-    /// operations on data related to the metadata.
-    ///
-    /// # Returns
-    ///
-    /// Returns a cloned instance of `CryptoManager`.
     pub fn get_crypto_manager(&self) -> CryptoManager {
         self.crypto.clone()
     }
@@ -433,22 +335,26 @@ mod tests {
         let path = dir.path().join("test_db");
         let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
 
-        let entry = FileEntry {
-            id: 1,
-            original_path: String::from("test/file.txt"),
-            size: 1234,
-            modified_time: 1620000000,
-            content_hash: [0; 32],
-            nonce: FileNonce {
-                file_id: 1,
-                chunk_counter: 0,
-                random: [0; 8],
-            },
-        };
+        // Create the source directory and file for testing
+        let source_dir = dir.path().join("test");
+        fs::create_dir_all(&source_dir).unwrap(); // Ensure the directory exists
+        let source_path = source_dir.join("file.txt");
+        fs::write(&source_path, "This is a test file.").unwrap(); // Write the dummy file
+
+        // Define the virtual path
+        let virtual_path = "virtual/file.txt";
 
         // Test inserting a file
-        let result = db.insert_file(entry);
+        let result = db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path);
         assert!(result.is_ok());
+
+        // Verify that the file entry was added
+        let retrieved_entry = db.get_file_by_path(virtual_path).unwrap();
+        assert!(retrieved_entry.is_some());
+        assert_eq!(retrieved_entry.unwrap().virtual_path, virtual_path);
+
+        // Clean up the dummy file
+        fs::remove_file(&source_path).unwrap();
     }
 
     #[test]
@@ -457,23 +363,28 @@ mod tests {
         let path = dir.path().join("test_db");
         let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
 
-        let entry = FileEntry {
-            id: 2,
-            original_path: String::from("test/file2.txt"),
-            size: 5678,
-            modified_time: 1620000001,
-            content_hash: [0; 32],
-            nonce: FileNonce {
-                file_id: 2,
-                chunk_counter: 0,
-                random: [0; 8],
-            },
-        };
+        // Create the source directory and file for testing
+        let source_dir = dir.path().join("test");
+        fs::create_dir_all(&source_dir).unwrap(); // Ensure the directory exists
+        let source_path = source_dir.join("file.txt");
+        fs::write(&source_path, "This is a test file.").unwrap(); // Write the dummy file
 
-        db.insert_file(entry.clone()).unwrap();
-        let retrieved = db.get_file(2).unwrap();
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().id, entry.id);
+        // Define the virtual path
+        let virtual_path = "virtual/file.txt";
+
+        // Insert the file into the database
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+
+        // Retrieve the file by its virtual path
+        let retrieved_entry = db.get_file_by_path(virtual_path).unwrap();
+        assert!(retrieved_entry.is_some());
+
+        let entry = retrieved_entry.unwrap(); // Store the unwrapped value in a variable
+        assert_eq!(entry.virtual_path, virtual_path);
+        assert_eq!(entry.source_path, source_path.to_string_lossy());
+
+        // Clean up the dummy file
+        fs::remove_file(&source_path).unwrap();
     }
 
     #[test]
@@ -482,21 +393,32 @@ mod tests {
         let path = dir.path().join("test_db");
         let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
 
-        let entry = FileEntry {
-            id: 3,
-            original_path: String::from("test/dir/file3.txt"),
-            size: 91011,
-            modified_time: 1620000002,
-            content_hash: [0; 32],
-            nonce: FileNonce {
-                file_id: 3,
-                chunk_counter: 0,
-                random: [0; 8],
-            },
-        };
+        // Create a nested directory structure for testing
+        let base_dir = dir.path().join("test");
+        fs::create_dir_all(&base_dir).unwrap(); // Ensure the base directory exists
 
-        db.insert_file(entry.clone()).unwrap();
-        let entries = db.list_directory("test/dir").unwrap();
+        // Create files in nested directories
+        let file1_path = base_dir.join("dir1").join("file1.txt");
+        let file2_path = base_dir.join("dir1").join("file2.txt");
+        let file3_path = base_dir.join("dir2").join("file3.txt");
+        fs::create_dir_all(file1_path.parent().unwrap()).unwrap(); // Create parent directory for file1
+        fs::write(&file1_path, "Content of file 1").unwrap();
+        fs::write(&file2_path, "Content of file 2").unwrap();
+        fs::create_dir_all(file3_path.parent().unwrap()).unwrap(); // Create parent directory for file3
+        fs::write(&file3_path, "Content of file 3").unwrap();
+
+        // Insert files into the database
+        db.insert_file(file1_path.to_string_lossy().as_ref(), "virtual/dir1/file1.txt").unwrap();
+        db.insert_file(file2_path.to_string_lossy().as_ref(), "virtual/dir1/file2.txt").unwrap();
+        db.insert_file(file3_path.to_string_lossy().as_ref(), "virtual/dir2/file3.txt").unwrap();
+
+        // List the contents of the first directory
+        let entries = db.list_directory("virtual/dir1").unwrap();
+        assert!(entries.contains(&String::from("file1.txt")));
+        assert!(entries.contains(&String::from("file2.txt")));
+
+        // List the contents of the second directory
+        let entries = db.list_directory("virtual/dir2").unwrap();
         assert!(entries.contains(&String::from("file3.txt")));
     }
 
@@ -506,23 +428,28 @@ mod tests {
         let path = dir.path().join("test_db");
         let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
 
-        let entry = FileEntry {
-            id: 4,
-            original_path: String::from("test/file4.txt"),
-            size: 1213,
-            modified_time: 1620000003,
-            content_hash: [0; 32],
-            nonce: FileNonce {
-                file_id: 4,
-                chunk_counter: 0,
-                random: [0; 8],
-            },
-        };
+        // Create the source directory and file for testing
+        let source_dir = dir.path().join("test");
+        fs::create_dir_all(&source_dir).unwrap(); // Ensure the directory exists
+        let source_path = source_dir.join("file.txt");
+        fs::write(&source_path, "This is a test file.").unwrap(); // Write the dummy file
 
-        db.insert_file(entry.clone()).unwrap();
-        let retrieved = db.get_file_by_path("test/file4.txt").unwrap();
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().id, entry.id);
+        // Define the virtual path
+        let virtual_path = "virtual/file.txt";
+
+        // Insert the file into the database
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+
+        // Retrieve the file by its virtual path
+        let retrieved_entry = db.get_file_by_path(virtual_path).unwrap();
+        assert!(retrieved_entry.is_some());
+
+        let entry = retrieved_entry.unwrap(); // Store the unwrapped value in a variable
+        assert_eq!(entry.virtual_path, virtual_path);
+        assert_eq!(entry.source_path, source_path.to_string_lossy());
+
+        // Clean up the dummy file
+        fs::remove_file(&source_path).unwrap();
     }
 
     #[test]
@@ -531,26 +458,29 @@ mod tests {
         let path = dir.path().join("test_db");
         let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
 
-        let entry = FileEntry {
-            id: 5,
-            original_path: String::from("test/file5.txt"),
-            size: 1500,
-            modified_time: 1620000004,
-            content_hash: [0; 32],
-            nonce: FileNonce {
-                file_id: 5,
-                chunk_counter: 0,
-                random: [0; 8],
-            },
-        };
+        // Create the source directory and file for testing
+        let source_dir = dir.path().join("test");
+        fs::create_dir_all(&source_dir).unwrap(); // Ensure the directory exists
+        let source_path = source_dir.join("file.txt");
+        fs::write(&source_path, "This is a test file.").unwrap(); // Write the dummy file
 
-        db.insert_file(entry.clone()).unwrap();
-        assert!(db.get_file(5).unwrap().is_some()); // Ensure the file exists before removal
+        // Define the virtual path
+        let virtual_path = "virtual/file.txt";
+
+        // Insert the file into the database
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+
+        // Ensure the file exists before removal
+        let retrieved_entry = db.get_file_by_path(virtual_path).unwrap();
+        assert!(retrieved_entry.is_some());
 
         // Test removing the file
-        let result = db.remove_file(5);
+        let result = db.remove_file(retrieved_entry.unwrap().id);
         assert!(result.is_ok());
-        assert!(db.get_file(5).unwrap().is_none()); // Ensure the file no longer exists
+
+        // Ensure the file no longer exists
+        let retrieved_after_removal = db.get_file_by_path(virtual_path).unwrap();
+        assert!(retrieved_after_removal.is_none()); // Should be None after removal
     }
 
     #[test]
@@ -559,29 +489,36 @@ mod tests {
         let path = dir.path().join("test_db");
         let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
 
-        let mut entry = FileEntry {
-            id: 6,
-            original_path: String::from("test/file6.txt"),
-            size: 2000,
-            modified_time: 1620000005,
-            content_hash: [0; 32],
-            nonce: FileNonce {
-                file_id: 6,
-                chunk_counter: 0,
-                random: [0; 8],
-            },
-        };
+        // Create the source directory and file for testing
+        let source_dir = dir.path().join("test");
+        fs::create_dir_all(&source_dir).unwrap(); // Ensure the directory exists
+        let source_path = source_dir.join("file.txt");
+        fs::write(&source_path, "This is a test file.").unwrap(); // Write the dummy file
 
-        db.insert_file(entry.clone()).unwrap();
+        // Define the virtual path
+        let virtual_path = "virtual/file.txt";
 
-        // Update the entry
-        entry.size = 2500; // Change the size
+        // Insert the file into the database
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+
+        // Retrieve the file entry to update
+        let mut entry = db.get_file_by_path(virtual_path).unwrap().unwrap();
+
+        // Update the entry's size and virtual path
+        entry.size += 100; // Change the size
+        entry.virtual_path = "virtual/updated_file.txt".to_string(); // Update the virtual path
+
+        // Update the file entry in the database
         let result = db.update_file(entry.clone());
         assert!(result.is_ok());
 
         // Retrieve the updated entry
-        let updated_entry = db.get_file(6).unwrap().unwrap();
-        assert_eq!(updated_entry.size, 2500); // Ensure the size has been updated
+        let updated_entry = db.get_file_by_path("virtual/updated_file.txt").unwrap();
+        assert!(updated_entry.is_some());
+        assert_eq!(updated_entry.unwrap().size, entry.size); // Ensure the size has been updated
+
+        // Clean up the dummy file
+        fs::remove_file(&source_path).unwrap();
     }
 
     #[test]
@@ -609,71 +546,62 @@ mod tests {
         let path = dir.path().join("test_db");
         let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
 
-        let entry = FileEntry {
-            id: 7,
-            original_path: String::from("test/file7.txt"),
-            size: 2000,
-            modified_time: 1620000005,
-            content_hash: [0; 32],
-            nonce: FileNonce {
-                file_id: 7,
-                chunk_counter: 0,
-                random: [0; 8],
-            },
-        };
+        // Create the source directory and file for testing
+        let source_dir = dir.path().join("test");
+        fs::create_dir_all(&source_dir).unwrap(); // Ensure the directory exists
+        let source_path = source_dir.join("file.txt");
+        fs::write(&source_path, "This is a test file.").unwrap(); // Write the dummy file
 
-        db.insert_file(entry.clone()).unwrap();
+        // Define the virtual path
+        let virtual_path = "virtual/file.txt";
+
+        // Insert the file into the database
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+
+        // Retrieve the file entry to update
+        let mut entry = db.get_file_by_path(virtual_path).unwrap().unwrap();
 
         // Attempt to update with an invalid path
-        let mut updated_entry = entry.clone();
-        updated_entry.original_path = String::from(""); // Set to an empty string to simulate an invalid path
+        entry.virtual_path = String::from(""); // Set to an empty string to simulate an invalid path
 
-        let result = db.update_file(updated_entry);
+        let result = db.update_file(entry.clone());
         assert!(result.is_err());
 
         // Check that the error is of the expected variant
         if let Err(e) = result {
             match e {
-                VeilError::Metadata(msg) => assert_eq!(msg, "Invalid file path".to_string()),
+                VeilError::Metadata(msg) => assert_eq!(msg, "Invalid virtual path".to_string()),
                 _ => panic!("Expected Metadata error, got {:?}", e),
             }
         }
+
+        // Clean up the dummy file
+        fs::remove_file(&source_path).unwrap();
     }
 
     #[test]
-    fn test_insert_file_with_duplicate_id() {
+    fn test_insert_file_with_existing_path() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test_db");
         let mut db = MetadataDB::new(path.clone(), "test_password").unwrap();
 
-        let entry1 = FileEntry {
-            id: 8,
-            original_path: String::from("test/file8.txt"),
-            size: 2000,
-            modified_time: 1620000005,
-            content_hash: [0; 32],
-            nonce: FileNonce {
-                file_id: 8,
-                chunk_counter: 0,
-                random: [0; 8],
-            },
-        };
+        // Create the source directory and file for testing
+        let source_dir = dir.path().join("test");
+        fs::create_dir_all(&source_dir).unwrap(); // Ensure the directory exists
+        let source_path = source_dir.join("file.txt");
+        fs::write(&source_path, "This is a test file.").unwrap(); // Write the dummy file
 
-        let entry2 = FileEntry {
-            id: 8, // Same ID as entry1
-            original_path: String::from("test/file8_duplicate.txt"),
-            size: 3000,
-            modified_time: 1620000006,
-            content_hash: [0; 32],
-            nonce: FileNonce {
-                file_id: 8,
-                chunk_counter: 0,
-                random: [0; 8],
-            },
-        };
+        // Define the virtual path
+        let virtual_path = "virtual/file.txt";
 
-        db.insert_file(entry1).unwrap();
-        let result = db.insert_file(entry2); // Attempt to insert with duplicate ID
+        // Insert the file into the database
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+
+        // Attempt to insert another file with the same virtual path
+        let duplicate_source_path = source_dir.join("file_duplicate.txt");
+        fs::write(&duplicate_source_path, "This is a duplicate file.").unwrap(); // Write the dummy duplicate file
+
+        let result = db.insert_file(duplicate_source_path.to_string_lossy().as_ref(), virtual_path);
         assert!(result.is_err());
 
         // Check that the error is of the expected variant
@@ -683,6 +611,10 @@ mod tests {
                 _ => panic!("Expected Metadata error, got {:?}", e),
             }
         }
+
+        // Clean up the dummy files
+        fs::remove_file(&source_path).unwrap();
+        fs::remove_file(&duplicate_source_path).unwrap();
     }
 
     // Clean up the temporary directory after all tests

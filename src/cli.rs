@@ -188,44 +188,21 @@ impl Cli {
             println!("Processing file: {:?}", source);
         }
 
-        // Generate a unique ID for the file
-        let file_id = rand::random::<u64>();
-        
-        // Calculate content hash
-        let mut hasher = blake3::Hasher::new();
-        let mut file = fs::File::open(source)?;
-        std::io::copy(&mut file, &mut hasher)?;
-        let content_hash = hasher.finalize().into();
-
-        // Create file entry
-        let metadata = fs::metadata(source)?;
-        let entry = FileEntry {
-            id: file_id,
-            original_path: target.to_string_lossy().into_owned(),
-            size: metadata.len(),
-            modified_time: metadata
-                .modified()?
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs(),
-            content_hash,
-            nonce: FileNonce {
-                file_id,
-                chunk_counter: 0,
-                random: [0; 8], // Will be generated during encryption
-            },
-        };
-
         // Encrypt the file
-        let dest_path = repo_path.join("contents").join(format!("{}.enc", file_id));
+        let dest_path = repo_path.join("contents").join(format!("{}.enc", target.file_name().unwrap().to_string_lossy()));
         encrypt_file(
             source,
             &dest_path,
             db.get_crypto_manager(),
-            file_id,
+            rand::random::<u64>(), // Generate a random file ID for encryption
         )?;
 
-        // Add to metadata DB
-        db.insert_file(entry)?;
+        // Add to metadata DB using the source and target paths
+        db.insert_file(source.to_string_lossy().as_ref(), target.to_string_lossy().as_ref())?;
+
+        if self.verbose {
+            println!("Successfully added {:?} to repository", source);
+        }
 
         Ok(())
     }
