@@ -146,7 +146,8 @@ veil clean
 veil add <source_path> [target_path]
 veil ls [path]
 veil find <pattern>
-veil unlock <path> [--writable] [--timeout <minutes>]
+veil unlock <path> 
+veil remove <path>
 
 # Information
 veil version
@@ -159,10 +160,6 @@ veil help
 Global options:
   --verbose    Enable verbose output
   --quiet      Suppress non-error output
-
-unlock options:
-  --writable   Allow modifications to decrypted files
-  --timeout    Auto-clean after specified minutes
 ```
 
 ## 6. Error Handling

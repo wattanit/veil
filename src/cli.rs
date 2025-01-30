@@ -102,6 +102,11 @@ enum Commands {
         #[arg(long)]
         writable: bool,
     },
+    /// Remove a file from the repository
+    Remove {
+        /// Path to the file to remove
+        path: std::path::PathBuf,
+    },
 }
 
 impl Cli {
@@ -122,6 +127,7 @@ impl Cli {
             Commands::Ls { path } => self.handle_ls(path),
             Commands::Find { pattern } => self.handle_find(pattern),
             Commands::Unlock { path, writable } => self.handle_unlock(path, writable),
+            Commands::Remove { path } => self.handle_remove(path),
         }
     }
 
@@ -771,6 +777,95 @@ impl Cli {
 
         // Add the newly unlocked file to the cache
         self.add_to_unlocked_cache(&target_path)?;
+
+        Ok(())
+    }
+
+    /// Removes a file from the repository.
+    ///
+    /// Deletes the specified file from the encrypted repository and updates the metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path of the file to remove from the repository
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the removal operation.
+    fn handle_remove(&self, path: &PathBuf) -> anyhow::Result<()> {
+        let repo_root = self.find_repository_root()?;
+        let repo_path = repo_root.join(".veil");
+
+        if !self.quiet {
+            println!("Removing {:?}", path);
+        }
+
+        // Get password for metadata DB
+        let password = rpassword::prompt_password("Enter repository password: ")?;
+
+        // Open metadata DB
+        let mut db = MetadataDB::new(repo_path.join(".metadata.db"), &password)?;
+
+        // Normalize the path to ensure it has a leading slash
+        let virtual_path = if path.starts_with("/") {
+            path.to_string_lossy().to_string()
+        } else {
+            format!("/{}", path.to_string_lossy())
+        };
+
+        // Check if path exists as a file first
+        if let Some(file_entry) = db.get_file_by_path(&virtual_path)? {
+            // It's a file - remove it
+            self.remove_single_file(&file_entry, &repo_path, &mut db, self.verbose)?;
+        } else {
+            // Check if it's a directory
+            let entries = db.list_directory(&virtual_path)?;
+            if entries.is_empty() {
+                anyhow::bail!("Path not found: {}", virtual_path);
+            }
+
+            // It's a directory - remove all files in it
+            for entry in entries {
+                let full_path = if virtual_path == "/" {
+                    format!("/{}", entry)
+                } else {
+                    format!("{}/{}", virtual_path, entry)
+                };
+
+                if let Some(file_entry) = db.get_file_by_path(&full_path)? {
+                    self.remove_single_file(&file_entry, &repo_path, &mut db, self.verbose)?;
+                }
+            }
+        }
+
+        if !self.quiet {
+            println!("Successfully removed {:?}", path);
+        }
+
+        Ok(())
+    }
+
+    fn remove_single_file(
+        &self,
+        file_entry: &FileEntry,
+        repo_path: &Path,
+        db: &mut MetadataDB,
+        verbose: bool,
+    ) -> anyhow::Result<()> {
+        if verbose {
+            println!("Removing file: {}", file_entry.virtual_path);
+        }
+
+        // Remove the file from the metadata database using the file ID
+        db.remove_file(file_entry.id)?;
+
+        // Remove the encrypted file from the contents directory
+        let encrypted_file_path = repo_path.join("contents").join(format!("{}.enc", file_entry.id));
+        if let Err(e) = std::fs::remove_file(&encrypted_file_path) {
+            if verbose {
+                eprintln!("Warning: Could not remove encrypted file: {}", e);
+            }
+        }
 
         Ok(())
     }

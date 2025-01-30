@@ -12,7 +12,7 @@ The tool features a command-line interface for ease of use and supports function
 - [X] Implement the streaming encryption/decryption in the fs module
 - [X] Build the metadata database handling
 - [X] Implement the filesystem operations
-- [ ] Complete the CLI command implementations
+- [X] Complete the CLI command implementations
 
 ---
 #### TASK: Implement the crypto module with XChaCha20-Poly1305 and Argon2id
@@ -38,9 +38,11 @@ The tool features a command-line interface for ease of use and supports function
 - [X] Implement `veil add` command
 - [X] Implement `veil ls` command
 - [X] Implement `veil unlock` command
-- [ ] Implement `veil clean` command
+- [X] Implement `veil clean` command
+- [X] Implement `veil remove` command
 
 ---
 ### BACKLOG
 - [ ] Implement secure memory wiping for sensitive data (Deferred)
 - [ ] Add more comprehensive tests including fuzz testing (Deferred)
+- [ ] Implement file search within the virtual directory (Deferred)
