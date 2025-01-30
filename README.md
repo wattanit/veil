@@ -36,7 +36,7 @@ The tool features a command-line interface for ease of use and supports function
 #### TASK: Complete the CLI command implementations
 - [X] Implement `veil init` command
 - [X] Implement `veil add` command
-- [ ] Implement `veil ls` command
+- [X] Implement `veil ls` command
 - [ ] Implement `veil unlock` command
 - [ ] Implement `veil clean` command
 

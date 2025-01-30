@@ -11,18 +11,17 @@ const PASSWORD_MIN_LENGTH: usize = 8;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-
 pub struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-
     /// Enable verbose output
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     verbose: bool,
 
     /// Suppress non-error output
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     quiet: bool,
+
+    #[command(subcommand)]
+    command: Commands,
 }
 
 #[derive(Subcommand)]
@@ -147,11 +146,64 @@ impl Cli {
         // Open metadata DB
         let mut db = MetadataDB::new(repo_path.join(".metadata.db"), &password)?;
         
+        // Get source filename
+        let source_filename = source_path.file_name()
+            .ok_or_else(|| anyhow::anyhow!("Invalid source filename"))?;
+        
         // Determine target path within repository
         let relative_target = match target_path {
-            Some(target) => target.clone(),
-            None => source_path.to_path_buf(),
+            Some(target) => {
+                if target.as_os_str() == "/" || target.as_os_str() == "." {
+                    // Use source filename for root directory with exactly one leading slash
+                    let filename = source_filename.to_string_lossy();
+                    let path = if filename.starts_with('/') {
+                        filename.to_string()
+                    } else {
+                        format!("/{}", filename)
+                    };
+                    PathBuf::from(path)
+                } else {
+                    let mut target_owned = target.clone();
+                    if self.verbose {
+                        println!("Initial target path: {:?}", target_owned);
+                    }
+
+                    let trimmed_target = target_owned.strip_prefix("/").unwrap_or(&target_owned);
+                    target_owned = trimmed_target.to_path_buf();
+                    
+                    if target_owned.file_name().is_none() || target_owned.to_string_lossy().ends_with('/') {
+                        // If target is a directory (ends with separator or has no filename component)
+                        // strip any trailing slashes but preserve the path
+                        let mut path_str = target_owned.to_string_lossy().to_string();
+                        if path_str.ends_with('/') {
+                            if self.verbose {
+                                println!("Removing trailing slash from: {:?}", path_str);
+                            }
+                            path_str.pop(); // Remove just the '/' character
+                            target_owned = PathBuf::from(path_str);
+                        }
+                        
+                        if self.verbose {
+                            println!("Adding source filename: {:?} to path: {:?}", source_filename, target_owned);
+                        }
+                        target_owned = PathBuf::from(format!("/{}", target_owned.display()));
+                        target_owned.push(source_filename);
+                        target_owned
+                    } else {
+                        PathBuf::from(format!("/{}", target_owned.display()))
+                        // target_owned
+                    }
+                }
+            },
+            None => {
+                // No target path means root directory, ensuring a leading slash
+                PathBuf::from(format!("/{}", source_filename.to_string_lossy()))
+            }
         };
+        
+        if self.verbose {
+            println!("Target path in repository: {:?}", relative_target.to_string_lossy());
+        }
         
         // Process the source path (handles both files and directories)
         self.add_path(&source_path, &relative_target, &repo_path, &mut db)?;
@@ -197,11 +249,25 @@ impl Cli {
             rand::random::<u64>(), // Generate a random file ID for encryption
         )?;
 
+        // Convert the target path to a string, ensuring consistent path separators
+        // and exactly one leading slash for root directory files
+        let virtual_path = target.to_string_lossy()
+            .trim_start_matches('/')  // Remove any leading slashes
+            .to_string();
+        
+        // Always add exactly one leading slash
+        let virtual_path = format!("/{}", virtual_path);
+
+        if self.verbose {
+            println!("Creating virtual path: {}", virtual_path);
+        }
+
         // Add to metadata DB using the source and target paths
-        db.insert_file(source.to_string_lossy().as_ref(), target.to_string_lossy().as_ref())?;
+        db.insert_file(source.to_string_lossy().as_ref(), &virtual_path)?;
 
         if self.verbose {
             println!("Successfully added {:?} to repository", source);
+            println!("Virtual path: {}", virtual_path);
         }
 
         Ok(())
@@ -246,8 +312,80 @@ impl Cli {
     }
 
     fn handle_ls(&self, path: &Option<PathBuf>) -> anyhow::Result<()> {
-        // Implementation for ls command
-        println!("Listing contents");
+        // Get repository root and verify it exists
+        let repo_root = self.find_repository_root()?;
+        let repo_path = repo_root.join(".veil");
+        
+        // Get password for metadata DB
+        let password = rpassword::prompt_password("Enter repository password: ")?;
+        
+        // Open metadata DB
+        let db = MetadataDB::new(repo_path.join(".metadata.db"), &password)?;
+        
+        // Determine which path to list
+        let list_path = match path {
+            Some(p) => {
+                // Handle special cases for root directory
+                if p.as_os_str() == "/" || p.as_os_str() == "." {
+                    String::from("/")  // Use "/" for root directory
+                } else {
+                    // Ensure path starts with a slash
+                    format!("/{}", p.to_string_lossy().trim_start_matches('/'))
+                }
+            },
+            None => String::from("/"), // Root directory
+        };
+        
+        if self.verbose {
+            println!("Listing directory: {}", list_path);
+        }
+        
+        // Get directory contents
+        let entries = db.list_directory(&list_path)?;
+        
+        if entries.is_empty() {
+            if !self.quiet {
+                println!("Directory is empty");
+            }
+            return Ok(());
+        }
+        
+        // Sort entries for consistent output
+        let mut entries = entries;
+        entries.sort();
+        
+        // Print entries
+        for entry in entries {
+            let full_path = if list_path == "/" {
+                format!("/{}", entry)
+            } else {
+                format!("{}/{}", list_path, entry)
+            };
+            
+            // Try to get file details
+            match db.get_file_by_path(&full_path)? {
+                Some(file_entry) => {
+                    // It's a file - print details
+                    if !self.quiet {
+                        println!("{:>10} {}",
+                            bytesize::to_string(file_entry.size, true),
+                            entry
+                        );
+                    } else {
+                        println!("{}", entry);
+                    }
+                }
+                None => {
+                    // It's a directory
+                    if !self.quiet {
+                        println!("{:>10} {}/", "", entry);
+                    } else {
+                        println!("{}/", entry);
+                    }
+                }
+            }
+        }
+        
         Ok(())
     }
 
