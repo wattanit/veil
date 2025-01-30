@@ -1,3 +1,39 @@
+//! Command-line interface for the Veil secure file encryption tool.
+//!
+//! This module provides the command-line interface functionality, handling user
+//! commands and their execution. It includes the `Cli` struct which parses and
+//! processes command-line arguments, and implements various commands like init,
+//! add, unlock, etc.
+//!
+//! # Overview
+//!
+//! The CLI module uses clap for argument parsing and provides the following
+//! main commands:
+//!
+//! - `init`: Initialize a new encrypted repository
+//! - `status`: Show repository status
+//! - `clean`: Clean up temporary files
+//! - `add`: Add files or directories to the repository
+//! - `ls`: List contents of the repository
+//! - `find`: Find files matching a pattern
+//! - `unlock`: Temporarily decrypt files
+//!
+//! # Usage
+//!
+//! ```bash
+//! # Initialize a new repository
+//! veil init /path/to/repo
+//!
+//! # Add files to the repository
+//! veil add source_file.txt [target_path]
+//!
+//! # List repository contents
+//! veil ls [path]
+//!
+//! # Unlock (decrypt) files
+//! veil unlock path/to/file [--writable] [--timeout <minutes>]
+//! ```
+
 use clap::{Parser, Subcommand};
 
 use std::path::{PathBuf, Path};
@@ -11,6 +47,11 @@ use std::collections::HashSet;
 const VEIL_VERSION: &str = "0.1.0";
 const PASSWORD_MIN_LENGTH: usize = 8;
 
+/// Command-line interface parser and executor.
+///
+/// This struct represents the command-line interface for Veil, handling
+/// argument parsing and command execution. It uses clap for defining the
+/// CLI structure and provides methods for executing each command.
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
@@ -68,6 +109,14 @@ enum Commands {
 }
 
 impl Cli {
+    /// Executes the command specified in the CLI arguments.
+    ///
+    /// This is the main entry point for command execution. It delegates to
+    /// specific handler methods based on the command provided.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the command execution.
     pub fn run(&self) -> anyhow::Result<()> {
         match &self.command {
             Commands::Init { path } => self.handle_init(path),
@@ -80,6 +129,18 @@ impl Cli {
         }
     }
 
+    /// Initializes a new encrypted repository.
+    ///
+    /// Creates the repository structure and initializes the metadata database
+    /// with a new master password.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path where the repository should be created
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the initialization.
     fn handle_init(&self, path: &PathBuf) -> anyhow::Result<()> {
         if !self.quiet {
             println!("Initializing Veil Repository at {:?}", path);
@@ -121,12 +182,28 @@ impl Cli {
         Ok(())
     }
 
+    /// Shows the current status of the repository.
+    ///
+    /// Displays information about the repository state, including any
+    /// unlocked files or pending operations.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the status check.
     fn handle_status(&self) -> anyhow::Result<()> {
         // Implementation for status command
         println!("Showing repository status");
         Ok(())
     }
 
+    /// Cleans up temporary files and unlocked content.
+    ///
+    /// Removes decrypted files and cleans up any temporary files created
+    /// during repository operations.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the cleanup operation.
     fn handle_clean(&self) -> anyhow::Result<()> {
         let repo_root = self.find_repository_root()?;
         let cache_file = repo_root.join(".unlocked_files");
@@ -158,6 +235,17 @@ impl Cli {
         Ok(())
     }
 
+    /// Cleans up unlocked files from the cache.
+    ///
+    /// Removes decrypted files listed in the cache and updates the cache.
+    ///
+    /// # Arguments
+    ///
+    /// * `cache_file` - Path to the unlocked files cache
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the count of cleaned and failed files.
     fn clean_unlocked_files(&self, cache_file: &Path) -> anyhow::Result<(usize, usize)> {
         let mut cleaned_count = 0;
         let mut failed_count = 0;
@@ -190,6 +278,14 @@ impl Cli {
         Ok((cleaned_count, failed_count))
     }
 
+    /// Cleans up empty directories after file removal.
+    ///
+    /// Removes empty directories that may remain after cleaning up
+    /// unlocked files.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the cleanup operation.
     fn cleanup_empty_dirs(&self) -> anyhow::Result<()> {
         let current_dir = std::env::current_dir()?;
         let mut dirs_to_check = HashSet::new();
@@ -223,6 +319,17 @@ impl Cli {
         Ok(())
     }
 
+    /// Adds a file to the unlocked files cache.
+    ///
+    /// Records temporarily decrypted files for later cleanup.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the unlocked file
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the cache update.
     fn add_to_unlocked_cache(&self, path: &Path) -> anyhow::Result<()> {
         let repo_root = self.find_repository_root()?;
         let cache_file = repo_root.join(".unlocked_files");
@@ -236,6 +343,19 @@ impl Cli {
         Ok(())
     }
 
+    /// Adds files or directories to the repository.
+    ///
+    /// Encrypts and stores files in the repository, preserving directory
+    /// structure and maintaining metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_path` - Path to the file or directory to add
+    /// * `target_path` - Optional target path within the repository
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the add operation.
     fn handle_add(&self, source_path: &PathBuf, target_path: &Option<PathBuf>) -> anyhow::Result<()> {
         // Get repository root and verify it exists
         let repo_root = self.find_repository_root()?;
@@ -405,6 +525,15 @@ impl Cli {
         Ok(())
     }
 
+    /// Finds the root directory of the current repository.
+    ///
+    /// Searches up the directory tree for a .veil directory to identify
+    /// the repository root.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the path to the repository root or an error
+    /// if not in a repository.
     fn find_repository_root(&self) -> anyhow::Result<PathBuf> {
         let mut current = std::env::current_dir()?;
         
@@ -419,6 +548,18 @@ impl Cli {
         }
     }
 
+    /// Lists contents of the repository.
+    ///
+    /// Displays files and directories stored in the repository, optionally
+    /// filtered by path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Optional path within the repository to list
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the list operation.
     fn handle_ls(&self, path: &Option<PathBuf>) -> anyhow::Result<()> {
         // Get repository root and verify it exists
         let repo_root = self.find_repository_root()?;
@@ -497,12 +638,37 @@ impl Cli {
         Ok(())
     }
 
+    /// Finds files matching a pattern.
+    ///
+    /// Searches the repository for files matching the specified pattern.
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - The pattern to search for
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the find operation.
     fn handle_find(&self, pattern: &str) -> anyhow::Result<()> {
         // Implementation for find command
         println!("Finding files matching: {}", pattern);
         Ok(())
     }
 
+    /// Temporarily decrypts files for access.
+    ///
+    /// Decrypts specified files to a temporary location with optional
+    /// write permissions and automatic cleanup.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file or directory to unlock
+    /// * `writable` - Whether to allow modifications to decrypted files
+    /// * `timeout` - Optional duration after which files are automatically cleaned up
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` indicating success or failure of the unlock operation.
     fn handle_unlock(&self, path: &PathBuf, writable: &bool, timeout: &Option<u32>) -> anyhow::Result<()> {
         // Get repository root and verify it exists
         let repo_root = self.find_repository_root()?;
