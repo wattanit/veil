@@ -240,13 +240,16 @@ impl Cli {
             println!("Processing file: {:?}", source);
         }
 
-        // Encrypt the file
+        // Generate a file ID once
+        let file_id = rand::random::<u64>();
+
+        // Encrypt the file with the generated file_id
         let dest_path = repo_path.join("contents").join(format!("{}.enc", target.file_name().unwrap().to_string_lossy()));
         encrypt_file(
             source,
             &dest_path,
             db.get_crypto_manager(),
-            rand::random::<u64>(), // Generate a random file ID for encryption
+            file_id,  // Use the generated file_id
         )?;
 
         // Convert the target path to a string, ensuring consistent path separators
@@ -262,8 +265,8 @@ impl Cli {
             println!("Creating virtual path: {}", virtual_path);
         }
 
-        // Add to metadata DB using the source and target paths
-        db.insert_file(source.to_string_lossy().as_ref(), &virtual_path)?;
+        // Add to metadata DB using the source and target paths, including the file_id
+        db.insert_file(source.to_string_lossy().as_ref(), &virtual_path, file_id)?;
 
         if self.verbose {
             println!("Successfully added {:?} to repository", source);
@@ -396,8 +399,102 @@ impl Cli {
     }
 
     fn handle_unlock(&self, path: &PathBuf, writable: &bool, timeout: &Option<u32>) -> anyhow::Result<()> {
-        // Implementation for unlock command
-        println!("Unlocking {:?}", path);
+        // Get repository root and verify it exists
+        let repo_root = self.find_repository_root()?;
+        let repo_path = repo_root.join(".veil");
+        
+        if !self.quiet {
+            println!("Unlocking {:?}", path);
+        }
+
+        // Get password for metadata DB
+        let password = rpassword::prompt_password("Enter repository password: ")?;
+        
+        // Open metadata DB
+        let db = MetadataDB::new(repo_path.join(".metadata.db"), &password)?;
+        
+        // Normalize the path to ensure it has a leading slash
+        let virtual_path = if path.starts_with("/") {
+            path.to_string_lossy().to_string()
+        } else {
+            format!("/{}", path.to_string_lossy())
+        };
+
+        // Get file entry from metadata DB
+        let file_entry = db.get_file_by_path(&virtual_path)?
+            .ok_or_else(|| anyhow::anyhow!("File not found: {}", virtual_path))?;
+        
+        // Create secure temporary directory under ~/.cache/veil/[session_id]
+        let cache_dir = dirs::cache_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine cache directory"))?
+            .join("veil")
+            .join(format!("session_{}", rand::random::<u64>()));
+        
+        std::fs::create_dir_all(&cache_dir)?;
+        
+        // Set directory permissions to user-only
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+
+        // Create unlocked directory inside session directory
+        let unlocked_dir = cache_dir.join("unlocked");
+        std::fs::create_dir(&unlocked_dir)?;
+        
+        // Create parent directories for the target file
+        let target_path = unlocked_dir.join(
+            path.strip_prefix("/").unwrap_or(path)
+        );
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        
+        // Decrypt the file
+        let source_path = repo_path
+            .join("contents")
+            .join(format!("{}.enc", file_entry.virtual_path.trim_start_matches('/')));
+        
+        if self.verbose {
+            println!("Decrypting {} to {}", source_path.display(), target_path.display());
+        }
+
+        // Decrypt file using the crypto manager
+        let crypto = db.get_crypto_manager();
+        crate::fs::decrypt_file(
+            &source_path,
+            &target_path,
+            crypto,
+            file_entry.id,  // Use the file_id from the FileEntry struct
+        )?;
+        
+        // Set file permissions based on writable flag
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if *writable { 0o600 } else { 0o400 };
+            std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(mode))?;
+        }
+
+        // Write session info file
+        let session_info = format!(
+            "path={}\nwritable={}\nstarted={}\n",
+            virtual_path,
+            writable,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs()
+        );
+        std::fs::write(cache_dir.join("session.info"), session_info)?;
+
+        if !self.quiet {
+            println!("Decrypted file available at: {}", target_path.display());
+            if *writable {
+                println!("File is writable - changes will NOT be automatically encrypted");
+            }
+        }
+
         Ok(())
     }
 } 

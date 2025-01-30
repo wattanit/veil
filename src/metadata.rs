@@ -171,24 +171,22 @@ impl MetadataDB {
     /// # Returns
     ///
     /// Returns a `Result` indicating success or a `VeilError`.
-    pub fn insert_file(&mut self, source_path: &str, virtual_path: &str) -> Result<(), VeilError> {
+    pub fn insert_file(&mut self, source_path: &str, virtual_path: &str, file_id: u64) -> Result<(), VeilError> {
         // Check if a file with the same virtual path already exists
         if self.db.contains_key(format!("vpath:{}", virtual_path).as_bytes())? {
             return Err(VeilError::Metadata("File already exists".to_string()));
         }
 
-        let id = self.generate_next_id()?;
-        
         let entry = FileEntry {
-            id,
+            id: file_id,  // Use the provided file_id instead of generating a new one
             virtual_path: virtual_path.to_string(),
             source_path: source_path.to_string(), // Keep original path for reference
             size: std::fs::metadata(source_path)?.len(),
             modified_time: SystemTime::now()
                 .duration_since(UNIX_EPOCH)?
                 .as_secs(),
-            content_hash: [0; 32], // You'll need to calculate this
-            nonce: CryptoManager::generate_file_nonce(id),
+            content_hash: [0; 32],
+            nonce: CryptoManager::generate_file_nonce(file_id),  // Use the same file_id for nonce
         };
 
         // Store the file entry itself
@@ -476,7 +474,7 @@ mod tests {
         let virtual_path = "virtual/file.txt";
 
         // Test inserting a file
-        let result = db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path);
+        let result = db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path, 1);
         assert!(result.is_ok());
 
         // Verify that the file entry was added
@@ -504,7 +502,7 @@ mod tests {
         let virtual_path = "virtual/file.txt";
 
         // Insert the file into the database
-        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path, 1).unwrap();
 
         // Retrieve the file by its virtual path
         let retrieved_entry = db.get_file_by_path(virtual_path).unwrap();
@@ -539,9 +537,9 @@ mod tests {
         fs::write(&file3_path, "Content of file 3").unwrap();
 
         // Insert files into the database
-        db.insert_file(file1_path.to_string_lossy().as_ref(), "virtual/dir1/file1.txt").unwrap();
-        db.insert_file(file2_path.to_string_lossy().as_ref(), "virtual/dir1/file2.txt").unwrap();
-        db.insert_file(file3_path.to_string_lossy().as_ref(), "virtual/dir2/file3.txt").unwrap();
+        db.insert_file(file1_path.to_string_lossy().as_ref(), "virtual/dir1/file1.txt", 1).unwrap();
+        db.insert_file(file2_path.to_string_lossy().as_ref(), "virtual/dir1/file2.txt", 2).unwrap();
+        db.insert_file(file3_path.to_string_lossy().as_ref(), "virtual/dir2/file3.txt", 3).unwrap();
 
         // List the contents of the first directory
         let entries = db.list_directory("virtual/dir1").unwrap();
@@ -569,7 +567,7 @@ mod tests {
         let virtual_path = "virtual/file.txt";
 
         // Insert the file into the database
-        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path, 1).unwrap();
 
         // Retrieve the file by its virtual path
         let retrieved_entry = db.get_file_by_path(virtual_path).unwrap();
@@ -599,7 +597,7 @@ mod tests {
         let virtual_path = "virtual/file.txt";
 
         // Insert the file into the database
-        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path, 1).unwrap();
 
         // Ensure the file exists before removal
         let retrieved_entry = db.get_file_by_path(virtual_path).unwrap();
@@ -630,7 +628,7 @@ mod tests {
         let virtual_path = "virtual/file.txt";
 
         // Insert the file into the database
-        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path, 1).unwrap();
 
         // Retrieve the file entry to update
         let mut entry = db.get_file_by_path(virtual_path).unwrap().unwrap();
@@ -687,7 +685,7 @@ mod tests {
         let virtual_path = "virtual/file.txt";
 
         // Insert the file into the database
-        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path, 1).unwrap();
 
         // Retrieve the file entry to update
         let mut entry = db.get_file_by_path(virtual_path).unwrap().unwrap();
@@ -726,13 +724,13 @@ mod tests {
         let virtual_path = "virtual/file.txt";
 
         // Insert the file into the database
-        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path).unwrap();
+        db.insert_file(source_path.to_string_lossy().as_ref(), virtual_path, 1).unwrap();
 
         // Attempt to insert another file with the same virtual path
         let duplicate_source_path = source_dir.join("file_duplicate.txt");
         fs::write(&duplicate_source_path, "This is a duplicate file.").unwrap(); // Write the dummy duplicate file
 
-        let result = db.insert_file(duplicate_source_path.to_string_lossy().as_ref(), virtual_path);
+        let result = db.insert_file(duplicate_source_path.to_string_lossy().as_ref(), virtual_path, 2);
         assert!(result.is_err());
 
         // Check that the error is of the expected variant
