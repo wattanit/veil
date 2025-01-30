@@ -37,7 +37,7 @@ The tool features a command-line interface for ease of use and supports function
 - [X] Implement `veil init` command
 - [X] Implement `veil add` command
 - [X] Implement `veil ls` command
-- [ ] Implement `veil unlock` command
+- [X] Implement `veil unlock` command
 - [ ] Implement `veil clean` command
 
 ---
