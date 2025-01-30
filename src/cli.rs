@@ -5,6 +5,8 @@ use std::fs;
 use crate::metadata::{MetadataDB, FileEntry};
 use crate::crypto::{CryptoManager, FileNonce};
 use crate::fs::encrypt_file;
+use std::io::{BufRead, BufReader, Write};
+use std::collections::HashSet;
 
 const VEIL_VERSION: &str = "0.1.0";
 const PASSWORD_MIN_LENGTH: usize = 8;
@@ -126,8 +128,111 @@ impl Cli {
     }
 
     fn handle_clean(&self) -> anyhow::Result<()> {
-        // Implementation for clean command
-        println!("Cleaning temporary files");
+        let repo_root = self.find_repository_root()?;
+        let cache_file = repo_root.join(".unlocked_files");
+        
+        if !cache_file.exists() {
+            if !self.quiet {
+                println!("No unlocked files found");
+            }
+            return Ok(());
+        }
+
+        let (cleaned_count, failed_count) = self.clean_unlocked_files(&cache_file)?;
+        self.cleanup_empty_dirs()?;
+
+        // Remove the cache file itself
+        if let Err(e) = std::fs::remove_file(&cache_file) {
+            if self.verbose {
+                eprintln!("Failed to remove cache file: {}", e);
+            }
+        }
+
+        if !self.quiet {
+            println!("Cleaned {} files", cleaned_count);
+            if failed_count > 0 {
+                println!("Failed to clean {} files", failed_count);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn clean_unlocked_files(&self, cache_file: &Path) -> anyhow::Result<(usize, usize)> {
+        let mut cleaned_count = 0;
+        let mut failed_count = 0;
+
+        if let Ok(file) = std::fs::File::open(cache_file) {
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                if let Ok(path) = line {
+                    let path = PathBuf::from(path);
+                    if path.exists() {
+                        match std::fs::remove_file(&path) {
+                            Ok(_) => {
+                                if self.verbose {
+                                    println!("Removed {:?}", path);
+                                }
+                                cleaned_count += 1;
+                            }
+                            Err(e) => {
+                                if self.verbose {
+                                    eprintln!("Failed to remove {:?}: {}", path, e);
+                                }
+                                failed_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((cleaned_count, failed_count))
+    }
+
+    fn cleanup_empty_dirs(&self) -> anyhow::Result<()> {
+        let current_dir = std::env::current_dir()?;
+        let mut dirs_to_check = HashSet::new();
+
+        // Collect all parent directories
+        for entry in walkdir::WalkDir::new(&current_dir)
+            .min_depth(1)
+            .into_iter()
+            .filter_entry(|e| e.file_type().is_dir()) {
+                if let Ok(entry) = entry {
+                    dirs_to_check.insert(entry.path().to_path_buf());
+                }
+            }
+
+        // Try to remove empty directories, starting from deepest
+        let mut dirs: Vec<_> = dirs_to_check.into_iter().collect();
+        dirs.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+
+        for dir in dirs {
+            if dir.exists() && dir.read_dir()?.next().is_none() {
+                if let Err(e) = std::fs::remove_dir(&dir) {
+                    if self.verbose {
+                        eprintln!("Failed to remove empty directory {:?}: {}", dir, e);
+                    }
+                } else if self.verbose {
+                    println!("Removed empty directory {:?}", dir);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn add_to_unlocked_cache(&self, path: &Path) -> anyhow::Result<()> {
+        let repo_root = self.find_repository_root()?;
+        let cache_file = repo_root.join(".unlocked_files");
+        
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(cache_file)?;
+
+        writeln!(file, "{}", path.display())?;
         Ok(())
     }
 
@@ -501,6 +606,9 @@ impl Cli {
             let mode = if *writable { 0o600 } else { 0o400 };
             std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(mode))?;
         }
+
+        // Add the newly unlocked file to the cache
+        self.add_to_unlocked_cache(&target_path)?;
 
         Ok(())
     }
